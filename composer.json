@@ -1,0 +1,38 @@
+{
+    "name": "brunocfalcao/step-dispatcher",
+    "description": "Step-based job execution system with state machines for reliable, sequential task processing",
+    "type": "library",
+    "license": "proprietary",
+    "autoload": {
+        "psr-4": {
+            "StepDispatcher\\": "src/",
+            "StepDispatcher\\Database\\": "database/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "StepDispatcher\\Tests\\": "tests/"
+        }
+    },
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^11.0|^12.0",
+        "illuminate/database": "^11.0|^12.0",
+        "illuminate/console": "^11.0|^12.0",
+        "illuminate/queue": "^11.0|^12.0",
+        "spatie/laravel-model-states": "^2.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^9.0|^10.0",
+        "pestphp/pest": "^3.0"
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "StepDispatcher\\StepDispatcherServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
