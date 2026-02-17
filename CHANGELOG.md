@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.2.1 - 2026-02-17
+
+### Fixes
+
+- [BUG FIX] Fix dispatcher groups configuration - use proper Greek letter groups (alpha through kappa) instead of generic group_1 through group_4
+
 ## 1.2.0 - 2026-02-14
 
 ### Features

@@ -43,6 +43,6 @@ return [
     |
     */
     'groups' => [
-        'available' => ['group_1', 'group_2', 'group_3', 'group_4'],
+        'available' => ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa'],
     ],
 ];
