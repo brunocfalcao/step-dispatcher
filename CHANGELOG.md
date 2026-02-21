@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.2.2 - 2026-02-21
+
+### Improvements
+
+- [IMPROVED] Remove `JustEndException` and `JustResolveException` marker exceptions — functionally identical to each other, both just fell through to `reportAndFail`
+- [IMPROVED] Simplify `isShortcutException()` to only check for `MaxRetriesReachedException`
+
 ## 1.2.1 - 2026-02-17
 
 ### Fixes

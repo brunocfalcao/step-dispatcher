@@ -4,8 +4,6 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Concerns\BaseStepJob;
 
-use StepDispatcher\Exceptions\JustEndException;
-use StepDispatcher\Exceptions\JustResolveException;
 use StepDispatcher\Exceptions\MaxRetriesReachedException;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Failed;
@@ -91,9 +89,7 @@ trait HandlesStepExceptions
 
     protected function isShortcutException(Throwable $e): bool
     {
-        return $e instanceof MaxRetriesReachedException
-            || $e instanceof JustResolveException
-            || $e instanceof JustEndException;
+        return $e instanceof MaxRetriesReachedException;
     }
 
     protected function isPermanentDatabaseError(Throwable $e): bool
