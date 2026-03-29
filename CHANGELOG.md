@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.1 - 2026-03-30
+
+### Fixes
+
+- [BUG FIX] Restore `JustResolveException` — removed in 1.2.2 but still used by consuming packages for unrecoverable step failures
+
 ## 1.3.0 - 2026-03-19
 
 ### Features
