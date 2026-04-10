@@ -103,7 +103,8 @@ final class StepsDispatcher extends BaseModel
             $dispatcher->updated_at &&
             $dispatcher->updated_at->lt(now()->subSeconds(20))
         ) {
-            $dispatcher->update(['can_dispatch' => true]);
+            $dispatcher->can_dispatch = true;
+            $dispatcher->save();
         }
 
         return DB::transaction(static function () use ($dispatcher, $group) {
