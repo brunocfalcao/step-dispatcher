@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.4.0 - 2026-04-11
+
+### Features
+
+- [NEW FEATURE] Add `steps:purge` command — purges old steps and ticks records, keeping only the last N days (default 30). Uses ID-based batch deletion for performance.
+
 ## 1.3.2 - 2026-04-10
 
 ### Fixes

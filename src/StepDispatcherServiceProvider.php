@@ -6,6 +6,7 @@ namespace StepDispatcher;
 
 use Illuminate\Support\ServiceProvider;
 use StepDispatcher\Commands\DispatchStepsCommand;
+use StepDispatcher\Commands\PurgeStepsCommand;
 use StepDispatcher\Commands\RecoverStaleStepsCommand;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Observers\StepObserver;
@@ -35,6 +36,7 @@ final class StepDispatcherServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 DispatchStepsCommand::class,
+                PurgeStepsCommand::class,
                 RecoverStaleStepsCommand::class,
             ]);
         }
