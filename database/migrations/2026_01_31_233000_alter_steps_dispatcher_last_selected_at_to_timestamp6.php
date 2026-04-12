@@ -16,6 +16,11 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // SQLite doesn't support MODIFY or fractional timestamps - skip for testing
+        if (DB::getDriverName() === 'sqlite') {
+            return;
+        }
+
         DB::statement('ALTER TABLE steps_dispatcher MODIFY last_selected_at TIMESTAMP(6) NULL DEFAULT NULL');
     }
 
