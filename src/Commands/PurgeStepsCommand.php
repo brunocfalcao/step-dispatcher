@@ -6,18 +6,26 @@ namespace StepDispatcher\Commands;
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use StepDispatcher\Models\StepsDispatcher;
+use StepDispatcher\Models\StepsDispatcherTicks;
 use StepDispatcher\Support\BaseCommand;
 
 final class PurgeStepsCommand extends BaseCommand
 {
     protected $signature = 'steps:purge
         {--days=30 : Keep records from the last N days (default: 30)}
+        {--ticks : Purge ticks using the recordTickWhen callable (ignores --days for ticks)}
         {--output : Display command output (silent by default)}';
 
     protected $description = 'Purge old steps and ticks records, keeping only the last N days.';
 
     public function handle(): int
     {
+        // Purge ticks using the recordTickWhen callable
+        if ($this->option('ticks')) {
+            return $this->purgeTicksByCallable();
+        }
+
         $days = (int) $this->option('days');
 
         if ($days < 1) {
@@ -40,6 +48,51 @@ final class PurgeStepsCommand extends BaseCommand
         $this->verboseInfo("Total deleted: {$stepsDeleted} step records.");
 
         $this->verboseInfo('Purge completed.');
+
+        return self::SUCCESS;
+    }
+
+    /**
+     * Purge ticks that don't pass the recordTickWhen callable.
+     * Loads ticks in chunks and evaluates the callable on each.
+     */
+    private function purgeTicksByCallable(): int
+    {
+        $callable = StepsDispatcher::getRecordTickWhenCallable();
+
+        if ($callable === null) {
+            $this->verboseError('No recordTickWhen callable registered. Register one in your Service Provider.');
+
+            return self::FAILURE;
+        }
+
+        $totalDeleted = 0;
+        $chunkSize = 1000;
+
+        $this->verboseInfo('Purging ticks using recordTickWhen callable...');
+
+        StepsDispatcherTicks::query()
+            ->orderBy('id')
+            ->chunk($chunkSize, function ($ticks) use ($callable, &$totalDeleted) {
+                $idsToDelete = [];
+
+                foreach ($ticks as $tick) {
+                    if (! $callable($tick)) {
+                        $idsToDelete[] = $tick->id;
+                    }
+                }
+
+                if (! empty($idsToDelete)) {
+                    StepsDispatcherTicks::whereIn('id', $idsToDelete)->delete();
+                    $totalDeleted += count($idsToDelete);
+
+                    if ($totalDeleted % 10000 === 0) {
+                        $this->verboseInfo("Deleted {$totalDeleted} tick records so far...");
+                    }
+                }
+            });
+
+        $this->verboseInfo("Total deleted: {$totalDeleted} tick records.");
 
         return self::SUCCESS;
     }

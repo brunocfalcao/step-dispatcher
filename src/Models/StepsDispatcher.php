@@ -13,6 +13,34 @@ final class StepsDispatcher extends BaseModel
 {
     protected $table = 'steps_dispatcher';
 
+    /**
+     * Callable to determine whether a tick should be recorded.
+     * Receives a StepsDispatcherTicks instance. Returns true to record, false to discard.
+     * When null, all ticks are recorded (backwards compatible).
+     *
+     * @var callable|null
+     */
+    protected static ?\Closure $recordTickWhenCallable = null;
+
+    /**
+     * Register a callable that determines whether a tick should be persisted.
+     * Intended to be called from a Service Provider's boot() method.
+     *
+     * Example: StepsDispatcher::recordTickWhen(fn (StepsDispatcherTicks $tick) => $tick->duration > 5000);
+     */
+    public static function recordTickWhen(\Closure $callable): void
+    {
+        self::$recordTickWhenCallable = $callable;
+    }
+
+    /**
+     * Get the registered tick recording callable.
+     */
+    public static function getRecordTickWhenCallable(): ?\Closure
+    {
+        return self::$recordTickWhenCallable;
+    }
+
     protected $casts = [
         'can_dispatch' => 'boolean',
         'last_tick_completed' => 'datetime',
@@ -165,28 +193,29 @@ final class StepsDispatcher extends BaseModel
             if ($tick) {
                 $cacheSuffix = $group ?? 'global';
                 $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
+                $durationMs = $startedAtFloat
+                    ? max(0, (int) round((microtime(true) - $startedAtFloat) * 1000))
+                    : 0;
 
-                if ($startedAtFloat) {
-                    $durationMs = max(0, (int) round((microtime(true) - $startedAtFloat) * 1000));
+                $tick->progress = $progress;
+                $tick->completed_at = $completedAt;
+                $tick->duration = $durationMs;
 
-                    $tick->update([
-                        'progress' => $progress,
-                        'completed_at' => $completedAt,
-                        'duration' => $durationMs,
-                    ]);
+                $callable = self::$recordTickWhenCallable;
 
-                    // Call the configured callback for slow dispatches
-                    $warningThreshold = config('step-dispatcher.dispatch.warning_threshold_ms', 40000);
-                    $onSlowDispatch = config('step-dispatcher.dispatch.on_slow_dispatch');
-
-                    if ($durationMs > $warningThreshold && is_callable($onSlowDispatch)) {
-                        $onSlowDispatch($durationMs);
-                    }
+                if ($callable !== null && ! $callable($tick)) {
+                    $tick->delete();
                 } else {
-                    $tick->update([
-                        'progress' => $progress,
-                        'completed_at' => $completedAt,
-                    ]);
+                    $tick->save();
+
+                    if ($durationMs > 0) {
+                        $warningThreshold = config('step-dispatcher.dispatch.warning_threshold_ms', 40000);
+                        $onSlowDispatch = config('step-dispatcher.dispatch.on_slow_dispatch');
+
+                        if ($durationMs > $warningThreshold && is_callable($onSlowDispatch)) {
+                            $onSlowDispatch($durationMs);
+                        }
+                    }
                 }
             }
         }

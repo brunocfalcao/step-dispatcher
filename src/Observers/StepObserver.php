@@ -10,6 +10,7 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\Support\StepDispatcher;
 
 final class StepObserver
 {
@@ -125,7 +126,7 @@ final class StepObserver
     {
         // Clear hostname when step transitions to Pending state (e.g., throttled jobs, retries)
         // This ensures the step can be picked up by any worker server, not tied to a specific host
-        if ($step->state instanceof Pending || get_class($step->state) === Pending::class) {
+        if ($step->state instanceof Pending) {
             $step->hostname = null;
         }
 
@@ -148,13 +149,10 @@ final class StepObserver
         // Set started_at when transitioning TO Running state (if not already set)
         // This covers transitions like PendingToRunning that don't set started_at
         // Only applies to updates (transitions), not initial creates
-        $isNowRunning = $step->state instanceof Running || get_class($step->state) === Running::class;
+        $isNowRunning = $step->state instanceof Running;
 
-        // Fix: getOriginal('state') returns a State object (or null for new models), not a string class name
-        // Must use instanceof or get_class() for proper comparison
         $originalState = $step->getOriginal('state');
-        $wasRunningBefore = $originalState instanceof Running
-            || (is_object($originalState) && get_class($originalState) === Running::class);
+        $wasRunningBefore = $originalState instanceof Running;
 
         // Only apply transition logic if this is an UPDATE (step already exists in DB)
         // Check $step->exists to ensure we're not in a create() call
@@ -178,9 +176,7 @@ final class StepObserver
 
         // Clear is_throttled when step transitions to Completed state
         // This ensures throttled steps that complete have their flag cleared
-        $isNowCompleted = $step->state instanceof Completed || get_class($step->state) === Completed::class;
-
-        if ($isNowCompleted) {
+        if ($step->state instanceof Completed) {
             $step->is_throttled = false;
         }
 
@@ -219,7 +215,8 @@ final class StepObserver
 
     public function created(Step $step): void
     {
-        // Observer hook - add custom logic here if needed
+        // Activate the dispatcher when a new step is created
+        StepDispatcher::activate();
     }
 
     public function updated(Step $step): void

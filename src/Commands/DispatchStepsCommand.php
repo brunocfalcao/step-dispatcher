@@ -30,6 +30,11 @@ final class DispatchStepsCommand extends BaseCommand
 
     public function handle(): int
     {
+        // Early return if dispatcher is idle (no active steps, no flag file)
+        if (! StepDispatcher::isActive()) {
+            return self::SUCCESS;
+        }
+
         try {
             $opt = $this->option('group');
 
@@ -48,7 +53,7 @@ final class DispatchStepsCommand extends BaseCommand
 
                 foreach ($groups as $group) {
                     StepDispatcher::dispatch($group);
-                    info('Dispatched steps for group: '.($group === null ? 'NULL' : $group));
+                    $this->verboseInfo('Dispatched steps for group: '.($group === null ? 'NULL' : $group));
                 }
 
                 return self::SUCCESS;
@@ -79,29 +84,5 @@ final class DispatchStepsCommand extends BaseCommand
         }
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Truncates storage/logs/laravel.log so each run starts with a clean log.
-     */
-    public function clearLaravelLog(): void
-    {
-        $path = storage_path('logs/laravel.log');
-
-        // Ensure directory exists; if not, try to create it quietly.
-        $dir = dirname($path);
-        if (! is_dir($dir)) {
-            @mkdir($dir, 0o755, true);
-        }
-
-        // Truncate or create the file.
-        $ok = @file_put_contents($path, '');
-        if ($ok === false) {
-            $this->verboseWarn('Could not clear laravel.log (permission or path issue).');
-
-            return;
-        }
-
-        $this->verboseInfo('laravel.log cleared.');
     }
 }

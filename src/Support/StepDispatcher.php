@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Support;
 
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
@@ -20,6 +22,57 @@ use StepDispatcher\Transitions\PendingToDispatched;
 final class StepDispatcher
 {
     use DispatchesJobs;
+
+    /**
+     * Check if any steps are in an active (non-idle) state.
+     * Active states: Pending, Dispatched, Running.
+     * Uses EXISTS for sub-millisecond performance on indexed state column.
+     */
+    public static function hasActiveSteps(): bool
+    {
+        return Step::whereIn('state', [Pending::class, Dispatched::class, Running::class])
+            ->exists();
+    }
+
+    /**
+     * Activate the dispatcher by creating the flag file.
+     * Called when new steps are created.
+     */
+    public static function activate(): void
+    {
+        $dir = storage_path('step-dispatcher');
+
+        if (! is_dir($dir)) {
+            @mkdir($dir, 0o755, true);
+        }
+
+        $flag = $dir.'/active.flag';
+
+        if (! file_exists($flag)) {
+            @file_put_contents($flag, (string) time());
+        }
+    }
+
+    /**
+     * Deactivate the dispatcher by removing the flag file.
+     * Called when no active steps remain.
+     */
+    public static function deactivate(): void
+    {
+        $flag = storage_path('step-dispatcher/active.flag');
+
+        if (file_exists($flag)) {
+            @unlink($flag);
+        }
+    }
+
+    /**
+     * Check if the dispatcher is active (flag file exists).
+     */
+    public static function isActive(): bool
+    {
+        return file_exists(storage_path('step-dispatcher/active.flag'));
+    }
 
     /**
      * Run a single "tick" of the dispatcher, optionally constrained to a group.
@@ -155,6 +208,11 @@ final class StepDispatcher
             $progress = 8;
         } finally {
             StepsDispatcher::endDispatch($progress, $group);
+
+            // Check if any active steps remain; deactivate if idle
+            if (! self::hasActiveSteps()) {
+                self::deactivate();
+            }
         }
     }
 
@@ -607,14 +665,14 @@ final class StepDispatcher
      * Pre-compute which pending steps can be dispatched using batch operations.
      * Eliminates per-step canTransition() overhead by computing decisions in bulk.
      *
-     * @param  \Illuminate\Support\Collection<int, Step>  $pendingSteps
+     * @param  Collection<int, Step>  $pendingSteps
      * @param  array<string, mixed>|null  $stepsCache
-     * @return \Illuminate\Support\Collection<int, Step>
+     * @return Collection<int, Step>
      */
     public static function computeDispatchableSteps(
-        \Illuminate\Support\Collection $pendingSteps,
+        Collection $pendingSteps,
         ?array $stepsCache
-    ): \Illuminate\Support\Collection {
+    ): Collection {
         if ($pendingSteps->isEmpty() || $stepsCache === null) {
             return collect();
         }
@@ -694,7 +752,7 @@ final class StepDispatcher
      *
      * @return array<string, bool>
      */
-    public static function computeConcludedIndices(\Illuminate\Support\Collection $stepsByBlockAndIndex): array
+    public static function computeConcludedIndices(Collection $stepsByBlockAndIndex): array
     {
         $concluded = [];
 

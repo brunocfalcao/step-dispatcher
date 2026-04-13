@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.6.0 - 2026-04-13
+
+### Features
+
+- [NEW FEATURE] Add idle mode — dispatcher skips all DB queries when no active steps exist (Pending/Dispatched/Running), using a file-based flag at `storage/step-dispatcher/active.flag`
+- [NEW FEATURE] Add `StepDispatcher::hasActiveSteps()` — sub-millisecond EXISTS query to check for active steps
+- [NEW FEATURE] Add `StepDispatcher::activate()` / `deactivate()` / `isActive()` for flag management
+- [NEW FEATURE] Add `StepsDispatcher::recordTickWhen()` — register a callable to conditionally persist tick records (e.g., only ticks > 5 seconds)
+- [NEW FEATURE] Add `--ticks` flag to `steps:purge` command — purges historical ticks that don't pass the `recordTickWhen` callable
+
+### Improvements
+
+- [IMPROVED] `StepObserver::created()` now activates the dispatcher flag automatically on step creation
+- [IMPROVED] Dispatcher deactivates flag in `finally` block when no active steps remain
+- [IMPROVED] Simplified `endDispatch()` — collapsed duplicate branches, callable evaluated in all code paths
+- [IMPROVED] Cleaned up `StepObserver::saving()` — removed redundant `get_class()` checks alongside `instanceof`
+
 ## 1.5.0 - 2026-04-13
 
 ### Improvements
