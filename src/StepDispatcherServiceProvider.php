@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace StepDispatcher;
 
 use Illuminate\Support\ServiceProvider;
+use StepDispatcher\Commands\ArchiveStepsCommand;
 use StepDispatcher\Commands\DispatchStepsCommand;
 use StepDispatcher\Commands\PurgeStepsCommand;
 use StepDispatcher\Commands\RecoverStaleStepsCommand;
@@ -35,6 +36,7 @@ final class StepDispatcherServiceProvider extends ServiceProvider
 
         if ($this->app->runningInConsole()) {
             $this->commands([
+                ArchiveStepsCommand::class,
                 DispatchStepsCommand::class,
                 PurgeStepsCommand::class,
                 RecoverStaleStepsCommand::class,

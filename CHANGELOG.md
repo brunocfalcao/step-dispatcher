@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.7.0 - 2026-04-14
+
+### Features
+
+- [NEW FEATURE] Add `steps:archive` command — moves fully-resolved step trees to `steps_archive` table, keeping `steps` table lean
+- [NEW FEATURE] Add `steps_archive` migration — mirrors `steps` schema with minimal indexes for historical lookups
+
+### Improvements
+
+- [IMPROVED] Wrap archive INSERT+DELETE in `DB::transaction()` to prevent data loss on crash
+
 ## 1.6.1 - 2026-04-14
 
 ### Features
