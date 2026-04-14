@@ -92,7 +92,11 @@ final class StepsDispatcher extends BaseModel
 
             DB::table('steps_dispatcher')
                 ->where('id', $dispatcher->id)
-                ->update(['last_selected_at' => DB::raw('NOW(6)')]);
+                ->update(['last_selected_at' => DB::raw(
+                    DB::getDriverName() === 'pgsql'
+                        ? 'clock_timestamp()'
+                        : 'NOW(6)'
+                )]);
 
             return $dispatcher->group;
         });

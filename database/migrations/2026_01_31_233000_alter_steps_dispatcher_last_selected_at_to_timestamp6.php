@@ -16,12 +16,18 @@ return new class extends Migration
      */
     public function up(): void
     {
-        // SQLite doesn't support MODIFY or fractional timestamps - skip for testing
-        if (DB::getDriverName() === 'sqlite') {
+        $driver = DB::getDriverName();
+
+        // SQLite doesn't support fractional timestamps - skip
+        if ($driver === 'sqlite') {
             return;
         }
 
-        DB::statement('ALTER TABLE steps_dispatcher MODIFY last_selected_at TIMESTAMP(6) NULL DEFAULT NULL');
+        if ($driver === 'pgsql') {
+            DB::statement('ALTER TABLE steps_dispatcher ALTER COLUMN last_selected_at TYPE TIMESTAMP(6) WITHOUT TIME ZONE');
+        } else {
+            DB::statement('ALTER TABLE steps_dispatcher MODIFY last_selected_at TIMESTAMP(6) NULL DEFAULT NULL');
+        }
     }
 
     /**
@@ -29,6 +35,12 @@ return new class extends Migration
      */
     public function down(): void
     {
-        DB::statement('ALTER TABLE steps_dispatcher MODIFY last_selected_at TIMESTAMP NULL DEFAULT NULL');
+        $driver = DB::getDriverName();
+
+        if ($driver === 'pgsql') {
+            DB::statement('ALTER TABLE steps_dispatcher ALTER COLUMN last_selected_at TYPE TIMESTAMP WITHOUT TIME ZONE');
+        } else {
+            DB::statement('ALTER TABLE steps_dispatcher MODIFY last_selected_at TIMESTAMP NULL DEFAULT NULL');
+        }
     }
 };

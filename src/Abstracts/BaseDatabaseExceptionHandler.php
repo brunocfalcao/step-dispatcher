@@ -7,6 +7,7 @@ namespace StepDispatcher\Abstracts;
 use Exception;
 use Illuminate\Database\QueryException;
 use StepDispatcher\Support\DatabaseExceptionHandlers\MySqlDatabaseExceptionHandler;
+use StepDispatcher\Support\DatabaseExceptionHandlers\PgsqlDatabaseExceptionHandler;
 use Throwable;
 
 /**
@@ -22,137 +23,65 @@ abstract class BaseDatabaseExceptionHandler
 {
     public int $backoffSeconds = 10;
 
-    // Must be implemented by concrete handler
     abstract public function ping(): bool;
 
-    // Returns the database engine name (e.g., 'mysql', 'postgresql')
     abstract public function getDatabaseEngine(): string;
 
-    // Check if exception should trigger retry (provided via DatabaseExceptionHelpers trait)
     abstract public function shouldRetry(Throwable $exception): bool;
 
-    // Check if exception should be ignored (provided via DatabaseExceptionHelpers trait)
     abstract public function shouldIgnore(Throwable $exception): bool;
 
-    // Check if exception is permanent error (provided via DatabaseExceptionHelpers trait)
     abstract public function isPermanentError(Throwable $exception): bool;
 
-    /**
-     * Factory method - instantiate correct handler based on DB engine.
-     * Auto-detects driver from config when no argument given.
-     */
     final public static function make(?string $engine = null): self
     {
         $engine ??= config('database.connections.'.config('database.default').'.driver');
 
         return match ($engine) {
             'mysql', 'mariadb' => new MySqlDatabaseExceptionHandler,
+            'pgsql' => new PgsqlDatabaseExceptionHandler,
             default => throw new Exception("Unsupported database engine: {$engine}")
         };
     }
 
-    /**
-     * Check if QueryException should be retried based on error patterns.
-     * Checks properties defined in concrete handlers:
-     * - $retryableMessages (array of error message patterns)
-     * - $retryableSqlStates (array of SQLSTATE codes)
-     * - $retryableErrorCodes (array of MySQL error numbers)
-     */
     final public function isRetryableError(QueryException $e): bool
     {
-        // Check message patterns
-        if (property_exists($this, 'retryableMessages')) {
-            foreach ($this->retryableMessages as $pattern) {
-                if (! (str_contains(haystack: $e->getMessage(), needle: $pattern))) {
-                    continue;
-                }
-
-                return true;
-            }
-        }
-
-        // Check SQLSTATE codes
-        if (property_exists($this, 'retryableSqlStates')) {
-            if (in_array($e->getCode(), $this->retryableSqlStates, strict: true)) {
-                return true;
-            }
-        }
-
-        // Check MySQL error numbers (errorInfo[1])
-        if (property_exists($this, 'retryableErrorCodes')) {
-            $errorCode = $e->errorInfo[1] ?? null;
-            if ($errorCode && in_array($errorCode, $this->retryableErrorCodes, strict: true)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->matchesErrorPattern($e, 'retryableMessages', 'retryableSqlStates', 'retryableErrorCodes');
     }
 
-    /**
-     * Check if QueryException is a permanent error based on patterns.
-     * Permanent errors should fail immediately without retry.
-     * Checks properties: $permanentMessages, $permanentSqlStates, $permanentErrorCodes
-     */
     final public function isPermanentErrorPattern(QueryException $e): bool
     {
-        // Check permanent message patterns
-        if (property_exists($this, 'permanentMessages')) {
-            foreach ($this->permanentMessages as $pattern) {
-                if (! (str_contains(haystack: $e->getMessage(), needle: $pattern))) {
-                    continue;
-                }
-
-                return true;
-            }
-        }
-
-        // Check permanent SQLSTATE codes
-        if (property_exists($this, 'permanentSqlStates')) {
-            if (in_array($e->getCode(), $this->permanentSqlStates, strict: true)) {
-                return true;
-            }
-        }
-
-        // Check permanent error codes
-        if (property_exists($this, 'permanentErrorCodes')) {
-            $errorCode = $e->errorInfo[1] ?? null;
-            if ($errorCode && in_array($errorCode, $this->permanentErrorCodes, strict: true)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->matchesErrorPattern($e, 'permanentMessages', 'permanentSqlStates', 'permanentErrorCodes');
     }
 
-    /**
-     * Check if QueryException should be ignored (complete successfully).
-     * Checks properties: $ignorableMessages, $ignorableSqlStates, $ignorableErrorCodes
-     */
     final public function isIgnorableError(QueryException $e): bool
     {
-        // Check ignorable message patterns
-        if (property_exists($this, 'ignorableMessages')) {
-            foreach ($this->ignorableMessages as $pattern) {
-                if (! (str_contains(haystack: $e->getMessage(), needle: $pattern))) {
-                    continue;
+        return $this->matchesErrorPattern($e, 'ignorableMessages', 'ignorableSqlStates', 'ignorableErrorCodes');
+    }
+
+    private function matchesErrorPattern(
+        QueryException $e,
+        string $messagesProp,
+        string $sqlStatesProp,
+        string $errorCodesProp,
+    ): bool {
+        if (property_exists($this, $messagesProp)) {
+            foreach ($this->$messagesProp as $pattern) {
+                if (str_contains($e->getMessage(), $pattern)) {
+                    return true;
                 }
+            }
+        }
 
+        if (property_exists($this, $sqlStatesProp)) {
+            if (in_array($e->getCode(), $this->$sqlStatesProp, strict: true)) {
                 return true;
             }
         }
 
-        // Check ignorable SQLSTATE codes
-        if (property_exists($this, 'ignorableSqlStates')) {
-            if (in_array($e->getCode(), $this->ignorableSqlStates, strict: true)) {
-                return true;
-            }
-        }
-
-        // Check ignorable error codes
-        if (property_exists($this, 'ignorableErrorCodes')) {
+        if (property_exists($this, $errorCodesProp)) {
             $errorCode = $e->errorInfo[1] ?? null;
-            if ($errorCode && in_array($errorCode, $this->ignorableErrorCodes, strict: true)) {
+            if ($errorCode && in_array($errorCode, $this->$errorCodesProp, strict: true)) {
                 return true;
             }
         }
@@ -160,22 +89,11 @@ abstract class BaseDatabaseExceptionHandler
         return false;
     }
 
-    /**
-     * Get backoff seconds with exponential increase based on retry attempt.
-     * Uses properties: $backoffMultiplier, $maxBackoffSeconds
-     */
     public function getBackoffSeconds(int $retryAttempt): int
     {
-        $multiplier = property_exists($this, 'backoffMultiplier')
-            ? $this->backoffMultiplier
-            : 2;
+        $multiplier = property_exists($this, 'backoffMultiplier') ? $this->backoffMultiplier : 2;
+        $maxBackoff = property_exists($this, 'maxBackoffSeconds') ? $this->maxBackoffSeconds : 120;
 
-        $maxBackoff = property_exists($this, 'maxBackoffSeconds')
-            ? $this->maxBackoffSeconds
-            : 120;
-
-        $backoff = $this->backoffSeconds * ($multiplier ** $retryAttempt);
-
-        return min((int) $backoff, $maxBackoff);
+        return min((int) ($this->backoffSeconds * ($multiplier ** $retryAttempt)), $maxBackoff);
     }
 }

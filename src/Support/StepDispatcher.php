@@ -602,13 +602,15 @@ final class StepDispatcher
 
         $placeholders = implode(separator: ',', array: array_fill(0, $rootBlocks->count(), '?'));
 
+        $groupCol = DB::getQueryGrammar()->wrap('group');
+
         $sql = "
             WITH RECURSIVE descendants AS (
                 SELECT child_block_uuid AS block_uuid
                 FROM steps
                 WHERE child_block_uuid IN ({$placeholders})
                   AND child_block_uuid IS NOT NULL
-                  ".($group !== null ? 'AND `group` = ?' : '').'
+                  ".($group !== null ? "AND {$groupCol} = ?" : '')."
 
                 UNION ALL
 
@@ -616,7 +618,7 @@ final class StepDispatcher
                 FROM steps s
                 INNER JOIN descendants d ON s.block_uuid = d.block_uuid
                 WHERE s.child_block_uuid IS NOT NULL
-                  '.($group !== null ? 'AND s.`group` = ?' : '').'
+                  ".($group !== null ? "AND s.{$groupCol} = ?" : '').'
             )
             SELECT DISTINCT block_uuid FROM descendants
         ';
