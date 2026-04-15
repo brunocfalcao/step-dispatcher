@@ -150,6 +150,18 @@ abstract class BaseStepJob implements ShouldQueue
         // Refresh step from database to get latest state (it should be Dispatched)
         $this->step->refresh();
 
+        // Guard against terminal state execution - if the step was cancelled,
+        // failed, completed, stopped, or skipped between dispatch and worker
+        // pickup, bail out silently. Without this guard, attempting an
+        // unregistered transition (e.g. Cancelled → Running) throws an
+        // exception that the error handler also can't recover from
+        // (Cancelled → Failed is also unregistered), creating an infinite
+        // retry loop under Horizon's --tries=0 configuration.
+        $stateClass = get_class($this->step->state);
+        if (in_array($stateClass, Step::terminalStepStates(), strict: true)) {
+            return false;
+        }
+
         // Guard against duplicate execution - if step is already Running,
         // this is a retry from Horizon after a timeout/crash.
         if ($this->step->state instanceof Running) {
