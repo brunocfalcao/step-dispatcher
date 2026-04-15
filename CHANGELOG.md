@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.8.0 - 2026-04-15
+
+### Fixes
+
+- [BUG FIX] Guard against terminal state execution in `prepareJobExecution()` — when a step is cancelled between dispatch and worker pickup, the worker now bails out silently instead of attempting unregistered state transitions that caused an infinite retry loop (64GB log in one day under Horizon `--tries=0`)
+
+### Features
+
+- [NEW FEATURE] Make flag_path configurable via `STEP_DISPATCHER_FLAG_PATH` env variable — allows multiple apps sharing the same database to use a single flag file location
+
 ## 1.7.0 - 2026-04-14
 
 ### Features
