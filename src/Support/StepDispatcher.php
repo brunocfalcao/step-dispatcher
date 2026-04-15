@@ -35,12 +35,32 @@ final class StepDispatcher
     }
 
     /**
+     * Resolve the configured flag directory path.
+     *
+     * @throws \RuntimeException if flag_path is not configured
+     */
+    private static function flagDir(): string
+    {
+        $path = config('step-dispatcher.flag_path');
+
+        if (empty($path)) {
+            throw new \RuntimeException(
+                'step-dispatcher.flag_path is not configured. '
+                .'Set STEP_DISPATCHER_FLAG_PATH in your .env to an absolute directory path. '
+                .'All applications sharing the same database must point to the same path.'
+            );
+        }
+
+        return $path;
+    }
+
+    /**
      * Activate the dispatcher by creating the flag file.
      * Called when new steps are created.
      */
     public static function activate(): void
     {
-        $dir = storage_path('step-dispatcher');
+        $dir = self::flagDir();
 
         if (! is_dir($dir)) {
             @mkdir($dir, 0o755, true);
@@ -59,7 +79,7 @@ final class StepDispatcher
      */
     public static function deactivate(): void
     {
-        $flag = storage_path('step-dispatcher/active.flag');
+        $flag = self::flagDir().'/active.flag';
 
         if (file_exists($flag)) {
             @unlink($flag);
@@ -71,7 +91,7 @@ final class StepDispatcher
      */
     public static function isActive(): bool
     {
-        return file_exists(storage_path('step-dispatcher/active.flag'));
+        return file_exists(self::flagDir().'/active.flag');
     }
 
     /**

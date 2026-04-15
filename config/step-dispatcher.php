@@ -35,6 +35,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Flag Path
+    |--------------------------------------------------------------------------
+    |
+    | Absolute directory path where the dispatcher stores its active flag file.
+    | All applications sharing the same database MUST point to the same path
+    | (typically the dispatcher app's storage directory).
+    |
+    | This value is REQUIRED. The dispatcher will throw a RuntimeException
+    | if not configured.
+    |
+    */
+    'flag_path' => env('STEP_DISPATCHER_FLAG_PATH'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Dispatch Groups
     |--------------------------------------------------------------------------
     |
