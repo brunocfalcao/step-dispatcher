@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.8.1 - 2026-04-20
+
+### Dependencies
+
+- [DEPENDENCIES] Allow Illuminate `^13.0` alongside `^11.0` / `^12.0` on `support`, `database`, `console`, and `queue` so the package installs on Laravel 13 hosts.
+
 ## 1.8.0 - 2026-04-15
 
 ### Fixes
