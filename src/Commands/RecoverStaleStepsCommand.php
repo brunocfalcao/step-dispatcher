@@ -98,8 +98,13 @@ final class RecoverStaleStepsCommand extends BaseCommand
         try {
             $reflection = new \ReflectionClass($step->class);
             $property = $reflection->getProperty('timeout');
+            $value = (int) $property->getDefaultValue();
 
-            return (int) $property->getDefaultValue();
+            // $timeout = 0 is a Laravel convention meaning "rely on the queue worker's
+            // own timeout". For stale detection we need a positive number, so fall back
+            // to DEFAULT_TIMEOUT. Without this, every such job is considered stale after
+            // 60s (0 + BUFFER), which kills legitimate long-running work.
+            return $value > 0 ? $value : self::DEFAULT_TIMEOUT;
         } catch (\ReflectionException) {
             return self::DEFAULT_TIMEOUT;
         }
