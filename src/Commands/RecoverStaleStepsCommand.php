@@ -48,6 +48,17 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 continue;
             }
 
+            // Parent steps stay in Running until every descendant reaches a
+            // terminal state — that is the state machine's design, not a
+            // zombie condition. Reclaiming such a parent causes its compute()
+            // to rerun and duplicate-dispatch the child block (including any
+            // DB rows created by child jobs). Skip parents whose tree is
+            // still in-flight; recover them only if every descendant is
+            // terminal (genuine zombie: parent stuck, tree already settled).
+            if ($step->isParent() && $this->hasActiveDescendants($step)) {
+                continue;
+            }
+
             $maxRetries = $this->resolveJobMaxRetries($step);
 
             if ($step->retries >= $maxRetries) {
@@ -124,5 +135,38 @@ final class RecoverStaleStepsCommand extends BaseCommand
         } catch (\ReflectionException) {
             return 2;
         }
+    }
+
+    /**
+     * Walk the parent's child_block_uuid and any nested parent blocks. Returns
+     * true if any descendant is not in a terminal state (Completed, Skipped,
+     * Cancelled, Failed, Stopped). Zero children anywhere → returns false,
+     * which correctly flags a never-dispatched parent as recoverable.
+     */
+    private function hasActiveDescendants(Step $parent): bool
+    {
+        if (empty($parent->child_block_uuid)) {
+            return false;
+        }
+
+        $children = Step::where('block_uuid', $parent->child_block_uuid)->get();
+
+        if ($children->isEmpty()) {
+            return false;
+        }
+
+        $terminalStates = Step::terminalStepStates();
+
+        foreach ($children as $child) {
+            if (! in_array(get_class($child->state), $terminalStates, strict: true)) {
+                return true;
+            }
+
+            if ($child->isParent() && $this->hasActiveDescendants($child)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

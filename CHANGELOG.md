@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.8.3 - 2026-04-21
+
+### Fixes
+
+- [BUG FIX] `RecoverStaleStepsCommand` now skips parent steps with active (non-terminal) descendants. Previously, orchestrator-type steps whose own `compute()` ran fast but whose child block took >360s to settle (slow exchanges, TAAPI throttling, or large position trees) were flipped Running → Pending by recover-stale and re-executed from scratch, duplicating child dispatches and DB side effects (e.g. extra Position rows from `PreparePositionsOpeningJob`). Genuine zombie parents (no children, or all descendants terminal yet parent stuck Running) are still recovered.
+
 ## 1.8.2 - 2026-04-20
 
 ### Fixes
