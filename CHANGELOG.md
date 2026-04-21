@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.8.4 - 2026-04-21
+
+### Improvements
+
+- [IMPROVED] Extend `idx_steps_class_state` with `is_throttled` as a trailing column (renamed to `idx_steps_class_state_throttled`). Admin observability dashboards that group by `(class, state, is_throttled)` now use a covering index (loose index scan, no temp table) instead of a full-table scan on a 300K+ row `steps` table. Wall-clock on that aggregation dropped from ~5s to ~400ms in production. Callers grouping or filtering by `(class, state)` alone continue to use the same index via the left-prefix rule.
+
 ## 1.8.3 - 2026-04-21
 
 ### Fixes
