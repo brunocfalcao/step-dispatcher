@@ -126,37 +126,69 @@ final class StepObserver
             $step->is_throttled = false;
         }
 
-        // Ensure group is never null on updates
         if (empty($step->group)) {
-            if (! empty($step->block_uuid)) {
-                // First, check if there's a parent step that spawned this child block
-                $parentStep = Step::query()
-                    ->where('child_block_uuid', $step->block_uuid)
-                    ->whereNotNull('group')
-                    ->first();
-
-                if ($parentStep) {
-                    $step->group = $parentStep->group;
-                }
-
-                // If no parent, look for siblings in the same block
-                if (empty($step->group)) {
-                    $siblingStep = Step::query()
-                        ->where('block_uuid', $step->block_uuid)
-                        ->whereNotNull('group')
-                        ->first();
-
-                    if ($siblingStep) {
-                        $step->group = $siblingStep->group;
-                    }
-                }
-            }
-
-            // If still no group (no parent/sibling found or first step in chain), assign via round-robin
-            if (empty($step->group)) {
-                $step->group = Step::getDispatchGroup();
-            }
+            $step->group = $this->resolveGroupForStep($step);
         }
+    }
+
+    /**
+     * Pick a dispatcher group for a step that was created without one.
+     *
+     * Resolution order:
+     *   1. Fan-out guard — once the step's block has reached the configured
+     *      threshold of siblings, skip inheritance and round-robin so bulk
+     *      dispatches spread across groups instead of piling onto one.
+     *   2. Parent step's group (the orchestrator that spawned this block).
+     *   3. Earlier sibling's group in the same block.
+     *   4. Round-robin via steps_dispatcher.last_selected_at.
+     */
+    private function resolveGroupForStep(Step $step): ?string
+    {
+        if (empty($step->block_uuid)) {
+            return Step::getDispatchGroup();
+        }
+
+        if ($this->blockHasReachedFanoutThreshold($step->block_uuid)) {
+            return Step::getDispatchGroup();
+        }
+
+        $parentStep = Step::query()
+            ->where('child_block_uuid', $step->block_uuid)
+            ->whereNotNull('group')
+            ->first();
+
+        if ($parentStep) {
+            return $parentStep->group;
+        }
+
+        $siblingStep = Step::query()
+            ->where('block_uuid', $step->block_uuid)
+            ->whereNotNull('group')
+            ->first();
+
+        if ($siblingStep) {
+            return $siblingStep->group;
+        }
+
+        return Step::getDispatchGroup();
+    }
+
+    /**
+     * Decide whether this block has grown past the fan-out threshold.
+     *
+     * The count is index-covered by (block_uuid, …) on the steps table and
+     * typically costs a sub-millisecond seek. Setting the threshold to 0
+     * in config disables fan-out — inheritance becomes the only rule.
+     */
+    private function blockHasReachedFanoutThreshold(string $blockUuid): bool
+    {
+        $threshold = (int) config('step-dispatcher.fanout_threshold', 50);
+
+        if ($threshold <= 0) {
+            return false;
+        }
+
+        return Step::where('block_uuid', $blockUuid)->count() >= $threshold;
     }
 
     public function created(Step $step): void
