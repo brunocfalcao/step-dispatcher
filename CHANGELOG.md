@@ -18,12 +18,6 @@ All notable changes to this project will be documented in this file.
 - [IMPROVED] `PendingToDispatched` — removed unused private `isParent()` helper.
 - [IMPROVED] `StepDispatcher::computeDispatchableSteps` — removed unreachable final `return false;` fallback; the remaining case after orphan/child elimination is always a parent step.
 
-## 1.8.5 - 2026-04-21
-
-### Fixes
-
-- [BUG FIX] Priority-queue deadlock: when a high-priority Pending step depended on a non-high-priority Pending parent, the dispatcher's "if any high-priority step exists, dispatch only high-priority" filter excluded the parent from every tick. The parent never dispatched, so the high-priority child waited forever, and the same filter repeated next tick — freezing every other Pending step in the group (observed: one stuck high-priority `StoreAccountBalanceJob` froze 19K pending steps on group theta for 19 hours). The filter now walks the `child_block_uuid → block_uuid` chain upward from each high-priority step and pulls any Pending ancestors into the tick's dispatch set, regardless of their own priority. Parents dispatch alongside their high-priority children and the deadlock class is eliminated.
-
 ## 1.8.4 - 2026-04-21
 
 ### Improvements

@@ -175,58 +175,9 @@ final class StepDispatcher
 
             $pendingSteps = $pendingQuery->get();
 
-            // Priority Queue System: when high-priority steps exist, dispatch
-            // only those (plus any parent steps they transitively depend on).
-            //
-            // The "include parents" rule is critical: a high-priority child
-            // step cannot dispatch until its parent reaches Running/Completed.
-            // If the parent is a normal-priority Pending step, a naive "keep
-            // only high-priority" filter would exclude the parent forever,
-            // leaving the child waiting on a parent that can never dispatch
-            // and freezing the entire group (every subsequent tick refilters
-            // to the same stuck high-priority child).
-            //
-            // We walk the child_block_uuid → block_uuid chain upward from each
-            // high-priority step and pull any Pending ancestors into the set,
-            // regardless of their own priority. Those ancestors then dispatch
-            // alongside the high-priority steps; the high-priority child will
-            // transition on a subsequent tick once its parent reaches Running.
+            // Priority Queue System: If any high-priority steps exist, filter to only those
             if ($pendingSteps->contains('priority', 'high')) {
-                $highPrioritySteps = $pendingSteps->where('priority', 'high');
-                $includedIds = $highPrioritySteps->pluck('id')->flip();
-
-                $frontier = $highPrioritySteps->pluck('block_uuid')->unique()->filter()->values();
-
-                while ($frontier->isNotEmpty()) {
-                    $ancestors = Step::where('state', Pending::class)
-                        ->whereIn('child_block_uuid', $frontier)
-                        ->get();
-
-                    if ($ancestors->isEmpty()) {
-                        break;
-                    }
-
-                    $frontier = collect();
-
-                    foreach ($ancestors as $ancestor) {
-                        if (isset($includedIds[$ancestor->id])) {
-                            continue;
-                        }
-
-                        $includedIds[$ancestor->id] = true;
-                        $pendingSteps->push($ancestor);
-
-                        if ($ancestor->block_uuid !== null) {
-                            $frontier->push($ancestor->block_uuid);
-                        }
-                    }
-
-                    $frontier = $frontier->unique()->values();
-                }
-
-                $pendingSteps = $pendingSteps
-                    ->filter(static fn (Step $step): bool => isset($includedIds[$step->id]))
-                    ->values();
+                $pendingSteps = $pendingSteps->where('priority', 'high')->values();
             }
 
             // Build cache to avoid N+1 queries in PendingToDispatched::canTransition()
