@@ -83,12 +83,8 @@ final class PendingToDispatched extends Transition
          */
         if ($this->isChild()) {
             $parent = $this->getParentStep();
-
-            if (! $parent) {
-                return false;
-            }
-
             $parentState = get_class($parent->state);
+
             if (! in_array($parentState, [Running::class, Completed::class], strict: true)) {
                 return false;
             }
@@ -103,17 +99,7 @@ final class PendingToDispatched extends Transition
          * Dispatch if previous index is concluded.
          * Children may not exist yet at this point.
          */
-        if ($this->isParent()) {
-            return $this->previousIndexIsConcluded();
-        }
-
-        /**
-         * Fallback:
-         * ----------------------------
-         * Not orphan, not child, not parent.
-         * Should never happen, deny dispatch.
-         */
-        return false;
+        return $this->previousIndexIsConcluded();
     }
 
     public function handle(): Step
@@ -250,15 +236,6 @@ final class PendingToDispatched extends Transition
         }
 
         return Step::where('child_block_uuid', $this->step->block_uuid)->exists();
-    }
-
-    /**
-     * Check if step is a parent (has children) using cache when available.
-     * Replicates Step::isParent() logic.
-     */
-    private function isParent(): bool
-    {
-        return ! is_null($this->step->child_block_uuid);
     }
 
     /**

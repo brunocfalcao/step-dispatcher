@@ -242,10 +242,7 @@ abstract class BaseStepJob implements ShouldQueue
 
     protected function finalizeJobExecution(): void
     {
-        if ($this->shouldComplete()) {
-            $this->complete();
-        }
-
+        $this->shouldComplete();
         $this->completeIfNotHandled();
     }
 

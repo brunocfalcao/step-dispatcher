@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.8.5 - 2026-04-21
+
+### Fixes
+
+- [BUG FIX] `StepsDispatcherTicks::steps()` relation now explicitly sets `tick_id` as the foreign key. The default `hasMany(Step::class)` resolved to `steps_dispatcher_ticks_id` (nonexistent column), making the relation throw on access.
+
+### Improvements
+
+- [IMPROVED] `BaseStepJob::finalizeJobExecution` — removed redundant `if ($this->shouldComplete())` wrapper. `shouldComplete()` returns `void` (always falsy), making the guarded call unreachable; `shouldComplete()` already invokes `complete()` internally.
+- [IMPROVED] `StepObserver::creating` — removed duplicate queue/priority/state/group normalization blocks. The `saving` hook fires before `creating` on Eloquent inserts and already handles these, so the duplicates in `creating` never fired.
+- [IMPROVED] `HandlesStepLifecycle::shouldDoubleCheck` — collapsed redundant branching; removed unreachable final `return false;`.
+- [IMPROVED] `RecoverStaleStepsCommand::hasActiveDescendants` — removed unreachable `empty($parent->child_block_uuid)` guard; the method is only called after `isParent()` already guarantees `child_block_uuid` is set.
+- [IMPROVED] `PendingToDispatched::canTransition` — removed unreachable defensive guards: `if (! $parent) return false;` (isChild and getParentStep share the same query) and the final not-orphan/not-child/not-parent fallback (impossible combination).
+- [IMPROVED] `PendingToDispatched` — removed unused private `isParent()` helper.
+- [IMPROVED] `StepDispatcher::computeDispatchableSteps` — removed unreachable final `return false;` fallback; the remaining case after orphan/child elimination is always a parent step.
+
 ## 1.8.4 - 2026-04-21
 
 ### Improvements

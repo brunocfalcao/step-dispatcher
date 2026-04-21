@@ -760,12 +760,8 @@ final class StepDispatcher
                 return self::previousIndexConcludedBatch($step, $concludedIndicesByBlock, $pendingResolveExceptions);
             }
 
-            // 5. Parent step
-            if ($isParentStep) {
-                return self::previousIndexConcludedBatch($step, $concludedIndicesByBlock, $pendingResolveExceptions);
-            }
-
-            return false;
+            // 5. Parent step (remaining case: not orphan, not child)
+            return self::previousIndexConcludedBatch($step, $concludedIndicesByBlock, $pendingResolveExceptions);
         });
     }
 

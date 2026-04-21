@@ -20,6 +20,6 @@ final class StepsDispatcherTicks extends BaseModel
 
     public function steps()
     {
-        return $this->hasMany(Step::class);
+        return $this->hasMany(Step::class, 'tick_id');
     }
 }

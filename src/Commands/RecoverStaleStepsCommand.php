@@ -145,10 +145,6 @@ final class RecoverStaleStepsCommand extends BaseCommand
      */
     private function hasActiveDescendants(Step $parent): bool
     {
-        if (empty($parent->child_block_uuid)) {
-            return false;
-        }
-
         $children = Step::where('block_uuid', $parent->child_block_uuid)->get();
 
         if ($children->isEmpty()) {

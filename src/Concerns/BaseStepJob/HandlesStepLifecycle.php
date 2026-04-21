@@ -179,20 +179,14 @@ trait HandlesStepLifecycle
             return false;
         }
 
-        $result = $this->doubleCheck();
-
-        if ($result === false) {
+        if ($this->doubleCheck() === false) {
             $this->step->increment('double_check');
             $this->retryJob();
 
             return true;
         }
 
-        if ($result === true) {
-            $this->step->update(['double_check' => 99]);
-
-            return false;
-        }
+        $this->step->update(['double_check' => 99]);
 
         return false;
     }
