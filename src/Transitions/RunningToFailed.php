@@ -37,6 +37,12 @@ final class RunningToFailed extends Transition
 
         $this->step->save(); // Save the step after state transition
 
+        Step::log($this->step->id, 'states', sprintf(
+            'Running → Failed | retries=%d | error=%s',
+            (int) $this->step->retries,
+            $this->step->error_message ? mb_substr((string) $this->step->error_message, 0, 200) : 'n/a'
+        ));
+
         // Return the step for further processing if needed
         return $this->step;
     }

@@ -29,6 +29,8 @@ final class PendingToSkipped extends Transition
         $this->step->is_throttled = false; // Clear throttle flag - step is no longer waiting
         $this->step->save(); // Save the transition
 
+        Step::log($this->step->id, 'states', 'Pending → Skipped');
+
         return $this->step;
     }
 }

@@ -27,6 +27,8 @@ final class DispatchedToCancelled extends Transition
         $this->step->state = new Cancelled($this->step); // Apply the Cancelled state
         $this->step->save(); // Save the transition
 
+        Step::log($this->step->id, 'states', 'Dispatched → Cancelled');
+
         return $this->step;
     }
 }

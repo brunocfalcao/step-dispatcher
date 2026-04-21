@@ -28,6 +28,8 @@ final class NotRunnableToCancelled extends Transition
         $this->step->completed_at = now();
         $this->step->save();
 
+        Step::log($this->step->id, 'states', 'NotRunnable → Cancelled');
+
         return $this->step;
     }
 }

@@ -27,6 +27,8 @@ final class NotRunnableToPending extends Transition
         $this->step->state = new Pending($this->step);
         $this->step->save();
 
+        Step::log($this->step->id, 'states', 'NotRunnable → Pending');
+
         return $this->step;
     }
 }

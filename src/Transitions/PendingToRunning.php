@@ -22,6 +22,11 @@ final class PendingToRunning extends Transition
         $this->step->state = new Running($this->step);
         $this->step->save();
 
+        Step::log($this->step->id, 'states', sprintf(
+            'Pending → Running | hostname=%s',
+            $this->step->hostname ?? 'unknown'
+        ));
+
         return $this->step;
     }
 }

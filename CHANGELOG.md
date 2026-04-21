@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.9.0 - 2026-04-21
+
+### Features
+
+- [NEW FEATURE] Per-step file-based diagnostic logging. Gated by `STEP_DISPATCHER_LOGGING_ENABLED` (default false). When enabled, each step gets a folder at `storage/logs/steps/{id}/` with channel files: `states.log` (every state transition + creation marker), `throttled.log` (reschedule-without-retry events), `retries.log` (retry cycles), `exceptions.log` (caught exceptions + handler decisions). Tick-level dispatcher events land at `storage/logs/dispatcher.log`. Folders are removed automatically in `StepObserver::deleted` when the step row is archived or purged, so log dirs don't accumulate. Writes are bypassed entirely when the flag is off — zero disk I/O in production unless debugging is active.
+- [NEW FEATURE] `step-dispatcher.logging.path` config (env: `STEP_DISPATCHER_LOGGING_PATH`) — override the base log directory (defaults to `storage_path('logs')`).
+
+### Improvements
+
+- [IMPROVED] Rewrote `HasStepLogging` trait with a channel-based API: `Step::log($id, $channel, $message)` per-step, `Step::logGlobal($channel, $message)` for dispatcher-wide events. Replaces the single-file `log()` signature that was never wired to any call site.
+- [IMPROVED] Wired logging calls into every state transition (`PendingToDispatched`, `DispatchedToRunning`, `RunningToCompleted`, all Failed/Skipped/Cancelled/Stopped/Pending paths), `HandlesStepLifecycle::retryJob` and `rescheduleWithoutRetry`, `HandlesStepExceptions::handleException`, and `StepDispatcher::dispatch` tick start/finish.
+- [IMPROVED] `StepObserver::created` writes an initial `CREATED` line to `states.log` so every step has a trace from birth, even if it never executes (cancelled before dispatch, skipped, etc.).
+
 ## 1.8.5 - 2026-04-21
 
 ### Fixes

@@ -38,6 +38,13 @@ final class RunningToPending extends Transition
         $this->step->state = new Pending($this->step);
         $this->step->save();
 
+        Step::log($this->step->id, 'states', sprintf(
+            'Running → Pending | retries=%d | is_throttled=%s | dispatch_after=%s',
+            (int) $this->step->retries,
+            $this->step->is_throttled ? 'true' : 'false',
+            $this->step->dispatch_after ? $this->step->dispatch_after->format('H:i:s.u') : 'null'
+        ));
+
         return $this->step;
     }
 }

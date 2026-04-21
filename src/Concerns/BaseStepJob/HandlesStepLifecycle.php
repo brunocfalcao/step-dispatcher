@@ -7,6 +7,7 @@ namespace StepDispatcher\Concerns\BaseStepJob;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Carbon;
 use StepDispatcher\Exceptions\MaxRetriesReachedException;
+use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Skipped;
@@ -53,6 +54,13 @@ trait HandlesStepLifecycle
             'is_throttled' => false,  // Ensure transition WILL increment retries
         ]);
 
+        Step::log($this->step->id, 'retries', sprintf(
+            'Retry scheduled | retries=%d | backoff_seconds=%d | dispatch_after=%s',
+            (int) $this->step->retries + 1,
+            (int) $this->jobBackoffSeconds,
+            $dispatchTime->format('H:i:s.u')
+        ));
+
         $this->step->state->transitionTo(Pending::class);
 
         $this->stepStatusUpdated = true;
@@ -73,6 +81,13 @@ trait HandlesStepLifecycle
         $this->step->is_throttled = true;   // Current: step is currently waiting due to throttling
 
         $this->step->save();
+
+        Step::log($this->step->id, 'throttled', sprintf(
+            'Throttled | backoff_seconds=%d | dispatch_after=%s | queue=%s',
+            (int) $this->jobBackoffSeconds,
+            $dispatchTime->format('H:i:s.u'),
+            $this->step->queue ?? 'default'
+        ));
 
         // Use proper transition! The is_throttled flag signals to NOT increment retries
         $this->step->state->transitionTo(Pending::class);

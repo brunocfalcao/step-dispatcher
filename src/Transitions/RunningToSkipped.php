@@ -30,6 +30,8 @@ final class RunningToSkipped extends Transition
         $this->step->is_throttled = false; // Clear throttle flag - step is no longer waiting
         $this->step->save(); // Save the transition
 
+        Step::log($this->step->id, 'states', 'Running → Skipped');
+
         return $this->step;
     }
 }

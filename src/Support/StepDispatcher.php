@@ -103,8 +103,20 @@ final class StepDispatcher
     {
         // Acquire the DB lock authoritatively; bail if already running.
         if (! StepsDispatcher::startDispatch($group)) {
+            Step::logGlobal('dispatcher', sprintf(
+                'Tick skipped | group=%s | reason=lock_not_acquired',
+                $group ?? 'NULL'
+            ));
+
             return;
         }
+
+        Step::logGlobal('dispatcher', sprintf(
+            'Tick started | group=%s',
+            $group ?? 'NULL'
+        ));
+
+        $tickStartedAt = microtime(true);
 
         $progress = 0;
 
@@ -226,8 +238,23 @@ final class StepDispatcher
             });
 
             $progress = 8;
+
+            Step::logGlobal('dispatcher', sprintf(
+                'Tick dispatched | group=%s | dispatchable=%d | pending_seen=%d | blocks_seen=%d',
+                $group ?? 'NULL',
+                $dispatchableSteps->count(),
+                $pendingSteps->count(),
+                $blockUuids->count(),
+            ));
         } finally {
             StepsDispatcher::endDispatch($progress, $group);
+
+            Step::logGlobal('dispatcher', sprintf(
+                'Tick finished | group=%s | progress=%d | duration_ms=%d',
+                $group ?? 'NULL',
+                $progress,
+                (int) round((microtime(true) - $tickStartedAt) * 1000),
+            ));
 
             // Check if any active steps remain; deactivate if idle
             if (! self::hasActiveSteps()) {

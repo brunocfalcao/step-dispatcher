@@ -123,6 +123,14 @@ final class PendingToDispatched extends Transition
 
         $this->step->save();
 
+        Step::log($this->step->id, 'states', sprintf(
+            'Pending → Dispatched | group=%s | tick_id=%s | queue=%s | priority=%s',
+            $this->step->group ?? 'null',
+            $this->step->tick_id ?? 'null',
+            $this->step->queue ?? 'default',
+            $this->step->priority ?? 'normal',
+        ));
+
         return $this->step;
     }
 

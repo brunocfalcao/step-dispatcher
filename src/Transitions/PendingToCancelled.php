@@ -27,6 +27,8 @@ final class PendingToCancelled extends Transition
         $this->step->state = new Cancelled($this->step); // Apply the Cancelled state
         $this->step->save();
 
+        Step::log($this->step->id, 'states', 'Pending → Cancelled');
+
         return $this->step;
     }
 }

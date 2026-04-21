@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace StepDispatcher\Concerns\BaseStepJob;
 
 use StepDispatcher\Exceptions\MaxRetriesReachedException;
+use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Failed;
 use StepDispatcher\Support\ExceptionParser;
@@ -46,7 +47,14 @@ trait HandlesStepExceptions
     {
         $stepId = $this->step->id ?? 'unknown';
 
+        Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', sprintf(
+            'Caught %s | message=%s',
+            class_basename($e),
+            mb_substr($e->getMessage(), 0, 300)
+        ));
+
         if ($this->isShortcutException($e)) {
+            Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: shortcut (MaxRetriesReached)');
             $this->handleShortcutException($e);
 
             return;
@@ -54,22 +62,27 @@ trait HandlesStepExceptions
 
         // Check for permanent database errors (syntax, schema issues) - fail immediately
         if ($this->isPermanentDatabaseError($e)) {
+            Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: permanent DB error → fail immediately');
             $this->reportAndFail($e);
 
             return;
         }
 
         if ($this->shouldRetryException($e)) {
+            Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: retry');
             $this->retryJobWithBackoff($e);
 
             return;
         }
 
         if ($this->shouldIgnoreException($e)) {
+            Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: ignore → complete');
             $this->completeAndIgnoreException();
 
             return;
         }
+
+        Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: resolve or fail');
 
         $this->logExceptionToStep($e);
 

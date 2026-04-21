@@ -163,10 +163,32 @@ final class StepObserver
     {
         // Activate the dispatcher when a new step is created
         StepDispatcher::activate();
+
+        // Seed the step's diagnostic log folder with a creation marker. The
+        // log trait early-returns when logging is disabled, so this is a
+        // no-op in production unless STEP_DISPATCHER_LOGGING_ENABLED is on.
+        Step::log($step->id, 'states', sprintf(
+            'CREATED | class=%s | block=%s | child_block=%s | index=%s | group=%s | priority=%s | queue=%s',
+            $step->class ?? 'null',
+            $step->block_uuid ?? 'null',
+            $step->child_block_uuid ?? 'null',
+            $step->index ?? 'null',
+            $step->group ?? 'null',
+            $step->priority ?? 'normal',
+            $step->queue ?? 'default',
+        ));
     }
 
     public function updated(Step $step): void
     {
         // Observer hook - add custom logic here if needed
+    }
+
+    public function deleted(Step $step): void
+    {
+        // Step row is gone (archived or purged) — remove its log folder so
+        // we don't accumulate orphaned directories. Safe to call unconditionally;
+        // the method no-ops when logging was never enabled.
+        $step->clearLogs();
     }
 }

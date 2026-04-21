@@ -34,6 +34,8 @@ final class RunningToStopped extends Transition
         $this->step->is_throttled = false; // Clear throttle flag - step is no longer waiting
         $this->step->save();
 
+        Step::log($this->step->id, 'states', 'Running → Stopped');
+
         return $this->step;
     }
 }
