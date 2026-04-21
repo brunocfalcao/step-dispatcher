@@ -167,9 +167,22 @@ final class StepObserver
         // Seed the step's diagnostic log folder with a creation marker. The
         // log trait early-returns when logging is disabled, so this is a
         // no-op in production unless STEP_DISPATCHER_LOGGING_ENABLED is on.
+        //
+        // Arguments are truncated to 200 chars to keep the line greppable
+        // when a job carries a large payload. Most Kraite jobs take simple
+        // {positionId}, {orderId}, {exchangeSymbolId} shapes that fit easily.
+        $argumentsPreview = 'null';
+        if (! empty($step->arguments)) {
+            $encoded = is_array($step->arguments)
+                ? (json_encode($step->arguments) ?: '{}')
+                : (string) $step->arguments;
+            $argumentsPreview = mb_substr($encoded, 0, 200);
+        }
+
         Step::log($step->id, 'states', sprintf(
-            'CREATED | class=%s | block=%s | child_block=%s | index=%s | group=%s | priority=%s | queue=%s',
+            'CREATED | class=%s | args=%s | block=%s | child_block=%s | index=%s | group=%s | priority=%s | queue=%s',
             $step->class ?? 'null',
+            $argumentsPreview,
             $step->block_uuid ?? 'null',
             $step->child_block_uuid ?? 'null',
             $step->index ?? 'null',
