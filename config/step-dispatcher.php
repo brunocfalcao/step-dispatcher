@@ -60,25 +60,4 @@ return [
     'groups' => [
         'available' => ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta', 'iota', 'kappa'],
     ],
-
-    /*
-    |--------------------------------------------------------------------------
-    | Group Fan-Out Threshold
-    |--------------------------------------------------------------------------
-    |
-    | Controls when a block's children stop inheriting their parent's group
-    | and start fanning out across groups via round-robin. When the number
-    | of steps in a block reaches this threshold, subsequent Step::create
-    | calls on the same block_uuid ignore inheritance and round-robin.
-    |
-    | Small orchestrator workflows (position lifecycle, sync, WAP) keep
-    | their children below the threshold and stay coherent on one group.
-    | Batch dispatches (kline fetches, indicator queries, BTC correlation
-    | across hundreds of symbols) exceed the threshold and spread across
-    | groups so no single group becomes a magnet for cron-driven work.
-    |
-    | Set to 0 to disable fan-out entirely (pure inheritance semantics).
-    |
-    */
-    'fanout_threshold' => env('STEP_DISPATCHER_FANOUT_THRESHOLD', 50),
 ];

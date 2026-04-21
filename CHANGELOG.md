@@ -2,16 +2,6 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.9.0 - 2026-04-21
-
-### Features
-
-- [NEW FEATURE] Group fan-out guard for batch dispatches: `StepObserver` now checks the block's sibling count when assigning a group. Once a block reaches `config('step-dispatcher.fanout_threshold')` siblings (default 50), subsequent children stop inheriting the block's group and round-robin across dispatch groups instead. Prevents a single group from becoming a magnet for cron-driven fan-out (hourly kline / correlation / elasticity / indicator batches that spawn hundreds of siblings on the same `block_uuid`) while preserving intra-group coherence for small orchestrator workflows (position lifecycle, sync, WAP — all stay well below 50). Configurable via the `STEP_DISPATCHER_FANOUT_THRESHOLD` env variable; set to 0 to disable (pure inheritance semantics).
-
-### Improvements
-
-- [IMPROVED] Refactored `StepObserver`'s group-resolution logic into a single `resolveGroupForStep()` helper. Previous implementation nested the inheritance lookups inline inside the `saving` hook; extracting them makes the fan-out decision a clearly separate step in the chain.
-
 ## 1.8.5 - 2026-04-21
 
 ### Fixes
