@@ -4,44 +4,88 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Commands;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\BaseCommand;
 
+/**
+ * Consolidated stall-recovery command.
+ *
+ * Default behaviour (no flags) — unchanged from the original package:
+ *   Sweeps Running steps whose worker has gone away, flips them back to
+ *   Pending (or Failed once retries are exhausted).
+ *
+ * Opt-in behaviours (flags):
+ *   --recover-dispatched : scan Dispatched steps stuck past --step-threshold
+ *                          seconds and promote them to priority/high so a
+ *                          free worker grabs them next tick.
+ *   --release-locks      : force-unlock steps_dispatcher rows held by a dead
+ *                          tick for longer than --lock-threshold seconds.
+ *
+ * Every branch that detects a stall fires StepDispatcher\Events\StaleStepsDetected
+ * so consuming apps can hook notifications without modifying the package.
+ */
 final class RecoverStaleStepsCommand extends BaseCommand
 {
-    protected $signature = 'steps:recover-stale {--output : Display command output (silent by default)}';
+    protected $signature = 'steps:recover-stale
+                            {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
+                            {--release-locks : Also release dispatcher locks held beyond the threshold}
+                            {--step-threshold=300 : Seconds in Dispatched before a step counts as stuck}
+                            {--lock-threshold=30 : Seconds a dispatcher lock can be held before force-release}
+                            {--output : Display command output (silent by default)}';
 
-    protected $description = 'Recover steps orphaned in Running state after worker process death';
+    protected $description = 'Recover stuck steps (Running zombies, Dispatched stalls) and release wedged dispatcher locks';
 
     /**
-     * Buffer added to the job timeout before considering a step stale (seconds).
+     * Buffer added to the job timeout before considering a Running step stale.
      */
-    private const BUFFER_SECONDS = 60;
+    private const RUNNING_BUFFER_SECONDS = 60;
 
     /**
-     * Fallback timeout when the job class cannot be resolved (seconds).
+     * Fallback timeout when the job class cannot be resolved.
      */
     private const DEFAULT_TIMEOUT = 300;
 
     public function handle(): int
+    {
+        if ((bool) $this->option('release-locks')) {
+            $this->releaseStaleDispatcherLocks((int) $this->option('lock-threshold'));
+        }
+
+        if ((bool) $this->option('recover-dispatched')) {
+            $this->recoverStaleDispatchedSteps((int) $this->option('step-threshold'));
+        }
+
+        $this->recoverStaleRunningSteps();
+
+        return self::SUCCESS;
+    }
+
+    // ========================================================================
+    // Running state recovery (legacy default path)
+    // ========================================================================
+
+    private function recoverStaleRunningSteps(): void
     {
         $staleSteps = Step::where('state', Running::class)
             ->whereNotNull('started_at')
             ->get();
 
         if ($staleSteps->isEmpty()) {
-            return self::SUCCESS;
+            return;
         }
 
         $recovered = 0;
 
         foreach ($staleSteps as $step) {
             $timeout = $this->resolveJobTimeout($step);
-            $staleThreshold = $timeout + self::BUFFER_SECONDS;
+            $staleThreshold = $timeout + self::RUNNING_BUFFER_SECONDS;
             $runningSeconds = (int) $step->started_at->diffInSeconds(now());
 
             if ($runningSeconds < $staleThreshold) {
@@ -93,11 +137,19 @@ final class RecoverStaleStepsCommand extends BaseCommand
             $this->verboseLine("[Step {$step->id}] {$step->label}: recovered ({$step->class})");
         }
 
-        if ($recovered > 0) {
-            $this->verboseInfo("Recovered {$recovered} stale step(s).");
+        if ($recovered === 0) {
+            return;
         }
 
-        return self::SUCCESS;
+        $this->verboseInfo("Recovered {$recovered} stale step(s).");
+
+        StaleStepsDetected::dispatch(
+            severity: 'warning',
+            reason: 'stale_running_steps_recovered',
+            count: $recovered,
+            oldestStep: $staleSteps->first(),
+            context: ['hostname' => gethostname()],
+        );
     }
 
     private function resolveJobTimeout(Step $step): int
@@ -164,5 +216,115 @@ final class RecoverStaleStepsCommand extends BaseCommand
         }
 
         return false;
+    }
+
+    // ========================================================================
+    // Dispatched state recovery (opt-in with --recover-dispatched)
+    // ========================================================================
+
+    private function recoverStaleDispatchedSteps(int $thresholdSeconds): void
+    {
+        $staleThreshold = now()->subSeconds($thresholdSeconds);
+
+        $baseQuery = Step::query()
+            ->where('state', Dispatched::class)
+            ->where('updated_at', '<', $staleThreshold);
+
+        $count = (clone $baseQuery)->count();
+
+        if ($count === 0) {
+            return;
+        }
+
+        $alreadyPromoted = (clone $baseQuery)
+            ->where('queue', 'priority')
+            ->where('priority', 'high')
+            ->count();
+
+        $oldestStep = (clone $baseQuery)
+            ->orderBy('updated_at', 'asc')
+            ->first();
+
+        // CRITICAL path: every stuck step was already promoted to priority/high
+        // on a previous run and is still Dispatched. Self-healing failed; the
+        // workers aren't picking from the priority queue either. Raise the
+        // alarm and don't try to promote again.
+        if ($alreadyPromoted > 0 && $alreadyPromoted === $count) {
+            $this->verboseError("CRITICAL: {$alreadyPromoted} priority step(s) still stuck after promotion.");
+
+            StaleStepsDetected::dispatch(
+                severity: 'critical',
+                reason: 'stale_dispatched_steps_still_stuck',
+                count: $count,
+                alreadyPromotedCount: $alreadyPromoted,
+                oldestStep: $oldestStep,
+                context: [
+                    'step_threshold_seconds' => $thresholdSeconds,
+                    'hostname' => gethostname(),
+                ],
+            );
+
+            return;
+        }
+
+        $promoted = (clone $baseQuery)
+            ->where(static function ($q): void {
+                $q->where('queue', '!=', 'priority')
+                    ->orWhere('priority', '!=', 'high');
+            })
+            ->update([
+                'priority' => 'high',
+                'queue' => 'priority',
+            ]);
+
+        $this->verboseInfo("Promoted {$promoted} stale Dispatched step(s) to priority/high.");
+
+        StaleStepsDetected::dispatch(
+            severity: 'warning',
+            reason: 'stale_dispatched_steps_promoted',
+            count: $count,
+            alreadyPromotedCount: $alreadyPromoted,
+            promotedCount: $promoted,
+            oldestStep: $oldestStep,
+            context: [
+                'step_threshold_seconds' => $thresholdSeconds,
+                'hostname' => gethostname(),
+            ],
+        );
+    }
+
+    // ========================================================================
+    // Dispatcher lock release (opt-in with --release-locks)
+    // ========================================================================
+
+    private function releaseStaleDispatcherLocks(int $thresholdSeconds): void
+    {
+        $staleThreshold = now()->subSeconds($thresholdSeconds);
+
+        $released = DB::table('steps_dispatcher')
+            ->where('can_dispatch', false)
+            ->where('updated_at', '<', $staleThreshold)
+            ->update([
+                'can_dispatch' => true,
+                'current_tick_id' => null,
+                'updated_at' => now(),
+            ]);
+
+        if ($released === 0) {
+            return;
+        }
+
+        $this->verboseWarn("Released {$released} stale dispatcher lock(s).");
+
+        StaleStepsDetected::dispatch(
+            severity: 'warning',
+            reason: 'stale_dispatcher_locks_released',
+            count: $released,
+            releasedLocksCount: $released,
+            context: [
+                'lock_threshold_seconds' => $thresholdSeconds,
+                'hostname' => gethostname(),
+            ],
+        );
     }
 }

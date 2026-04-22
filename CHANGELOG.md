@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.1 - 2026-04-22
+
+### Improvements
+
+- [IMPROVED] `config/step-dispatcher.php` — extended `queues.valid` to include Kraite's domain queue names (`positions`, `orders`, `cronjobs`, `indicators`) alongside the existing `default` + `priority`. Consumer apps that use additional queue names now pass the observer's queue-validation check; previously unknown names were silently rewritten to `default`.
+
+## 1.11.0 - 2026-04-22
+
+### Features
+
+- [NEW FEATURE] `StepDispatcher\Events\StaleStepsDetected` — event fired by `steps:recover-stale` whenever the dispatcher surfaces a stall condition. Payload carries severity (`warning`/`critical`), reason (`stale_running_steps_recovered`, `stale_dispatched_steps_promoted`, `stale_dispatched_steps_still_stuck`, `stale_dispatcher_locks_released`), count, already-promoted count, promoted count, released-locks count, oldest step model, and a free-form context array. Consuming apps listen and decide how to react (pushover, Slack, Sentry breadcrumb). The package itself never notifies anyone.
+- [NEW FEATURE] `steps:recover-stale --recover-dispatched` — opt-in flag. Scans Dispatched steps stuck past `--step-threshold` seconds (default 300) and promotes them to `queue=priority, priority=high` so a free worker picks them up next tick. When every stuck step was already promoted on a prior run the flag surfaces a CRITICAL event instead of promoting again.
+- [NEW FEATURE] `steps:recover-stale --release-locks` — opt-in flag. Force-releases `steps_dispatcher` rows held by a dead tick for longer than `--lock-threshold` seconds (default 30). Fires a warning event listing how many locks were freed.
+
+### Improvements
+
+- [IMPROVED] `steps:recover-stale` default behaviour (no flags) is identical to 1.10 — Running-state recovery only. All new behaviours are opt-in via flags so every existing caller keeps working without changes.
+- [IMPROVED] Running-state recovery now fires `StaleStepsDetected` when it actually recovered at least one step, so operators get the same visibility as the Dispatched/locks paths.
+
+### Consolidation
+
+- Replaces the per-app `kraite:cron-check-stale-data` command (lived in `kraitebot/core`). All generic dispatcher-health responsibilities — promotion to priority queue, wedged-lock release, stall detection — are now owned by this package. App-specific concerns (notification channels, throttle duration, recipient user) stay in the consuming app, wired via the new event.
+
 ## 1.10.0 - 2026-04-22
 
 ### Features

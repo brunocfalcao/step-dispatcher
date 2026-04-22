@@ -13,7 +13,7 @@ return [
     |
     */
     'queues' => [
-        'valid' => ['default', 'priority'],
+        'valid' => ['default', 'priority', 'positions', 'orders', 'cronjobs', 'indicators'],
     ],
 
     /*
