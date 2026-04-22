@@ -44,6 +44,17 @@ abstract class BaseStepJob implements ShouldQueue
 
     public int $jobBackoffSeconds = 10;
 
+    /**
+     * Optional millisecond-precision backoff. When set to a positive value,
+     * `retryJob()` and `rescheduleWithoutRetry()` use `addMilliseconds($jobBackoffMs)`
+     * instead of `addSeconds($jobBackoffSeconds)`. Lets callers that need
+     * sub-second retry precision (e.g. the API throttler path) schedule
+     * retries at the exact remainder of the configured min-delay instead
+     * of being forced up to the next whole second. Zero disables the
+     * override and the legacy seconds-based backoff applies.
+     */
+    public int $jobBackoffMs = 0;
+
     public bool $stepStatusUpdated = false;
 
     public float $startMicrotime = 0.0;

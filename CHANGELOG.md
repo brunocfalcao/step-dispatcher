@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.10.0 - 2026-04-22
+
+### Features
+
+- [NEW FEATURE] `BaseStepJob::$jobBackoffMs` — opt-in millisecond-precision retry backoff. When set to a positive value, `retryJob()` and `rescheduleWithoutRetry()` schedule the next dispatch with `addMilliseconds($jobBackoffMs)` instead of `addSeconds($jobBackoffSeconds)`. Callers that need sub-second precision (API throttler paths where min-delay deficits are tens of ms) can now schedule retries at the exact remainder instead of rounding up to the next whole second. Default is `0` (feature off) — legacy seconds-based backoff is unchanged for every existing caller.
+- [NEW FEATURE] Migration `upgrade_dispatch_after_to_millisecond_precision` — promotes `steps.dispatch_after` and `steps_archive.dispatch_after` from `TIMESTAMP` to `TIMESTAMP(3)` via Laravel's Schema Builder (portable across MySQL and PostgreSQL). Widening the column is zero-data-loss; existing second-precision values remain valid. Required so the new `jobBackoffMs` path can actually store sub-second retry targets instead of truncating at column write.
+
+### Improvements
+
+- [IMPROVED] Extracted `resolveNextDispatchTime()` and `resolveBackoffLabel()` helpers in `HandlesStepLifecycle` so `retryJob()` and `rescheduleWithoutRetry()` share the same ms-vs-seconds decision (and matching log label: `1500ms` vs `10s`) instead of duplicating `now()->addSeconds(...)` inline.
+- [IMPROVED] `HandlesStepExceptions::retryJobWithBackoff` — only writes `dispatch_after` directly when the database exception handler has its own exponential backoff. For every other exception, delegation to `retryJob()` is complete, so the `jobBackoffMs` override is honoured on the API throttler path.
+
 ## 1.9.0 - 2026-04-21
 
 ### Features

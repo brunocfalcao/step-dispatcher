@@ -42,7 +42,7 @@ trait HandlesStepLifecycle
 
     public function retryJob(Carbon|CarbonImmutable|null $dispatchAfter = null): void
     {
-        $dispatchTime = $dispatchAfter ?? now()->addSeconds($this->jobBackoffSeconds);
+        $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
         // Check if step should be escalated to high priority
         if (method_exists($this, 'shouldChangeToHighPriority') && $this->shouldChangeToHighPriority() === true) {
@@ -55,9 +55,9 @@ trait HandlesStepLifecycle
         ]);
 
         Step::log($this->step->id, 'retries', sprintf(
-            'Retry scheduled | retries=%d | backoff_seconds=%d | dispatch_after=%s',
+            'Retry scheduled | retries=%d | backoff=%s | dispatch_after=%s',
             (int) $this->step->retries + 1,
-            (int) $this->jobBackoffSeconds,
+            $this->resolveBackoffLabel(),
             $dispatchTime->format('H:i:s.u')
         ));
 
@@ -68,7 +68,7 @@ trait HandlesStepLifecycle
 
     public function rescheduleWithoutRetry(Carbon|CarbonImmutable|null $dispatchAfter = null): void
     {
-        $dispatchTime = $dispatchAfter ?? now()->addSeconds($this->jobBackoffSeconds);
+        $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
         // Check if step should be escalated to high priority
         if (method_exists($this, 'shouldChangeToHighPriority') && $this->shouldChangeToHighPriority() === true) {
@@ -83,8 +83,8 @@ trait HandlesStepLifecycle
         $this->step->save();
 
         Step::log($this->step->id, 'throttled', sprintf(
-            'Throttled | backoff_seconds=%d | dispatch_after=%s | queue=%s',
-            (int) $this->jobBackoffSeconds,
+            'Throttled | backoff=%s | dispatch_after=%s | queue=%s',
+            $this->resolveBackoffLabel(),
             $dispatchTime->format('H:i:s.u'),
             $this->step->queue ?? 'default'
         ));
@@ -93,6 +93,34 @@ trait HandlesStepLifecycle
         $this->step->state->transitionTo(Pending::class);
 
         $this->stepStatusUpdated = true;
+    }
+
+    /**
+     * Pick the next `dispatch_after` timestamp for a retry/reschedule.
+     *
+     * Callers can set `jobBackoffMs` for millisecond precision (used by the
+     * API throttler path where min-delay deficits are commonly tens of ms)
+     * or leave it at 0 and let the legacy seconds-based backoff apply.
+     */
+    protected function resolveNextDispatchTime(): Carbon|CarbonImmutable
+    {
+        if (isset($this->jobBackoffMs) && $this->jobBackoffMs > 0) {
+            return now()->addMilliseconds($this->jobBackoffMs);
+        }
+
+        return now()->addSeconds($this->jobBackoffSeconds);
+    }
+
+    /**
+     * Short log label for the backoff value picked by `resolveNextDispatchTime`.
+     */
+    protected function resolveBackoffLabel(): string
+    {
+        if (isset($this->jobBackoffMs) && $this->jobBackoffMs > 0) {
+            return $this->jobBackoffMs.'ms';
+        }
+
+        return $this->jobBackoffSeconds.'s';
     }
 
     public function retryForConfirmation(): void

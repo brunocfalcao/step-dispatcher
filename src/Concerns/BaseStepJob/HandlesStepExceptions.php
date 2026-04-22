@@ -194,18 +194,20 @@ trait HandlesStepExceptions
             return;
         }
 
-        $backoffSeconds = $this->jobBackoffSeconds;
-
-        // Use exponential backoff for database exceptions
+        // Database-specific exceptions use their own exponential backoff
+        // (still second-precision — sub-ms retries don't help connection
+        // recovery). For everything else, delegate to retryJob() so it can
+        // pick up the `jobBackoffMs` override when sub-second precision is
+        // warranted (e.g. the API throttler path after a min-delay deficit).
         if (isset($this->databaseExceptionHandler)
             && $this->databaseExceptionHandler->shouldRetry($e)
         ) {
             $backoffSeconds = $this->databaseExceptionHandler->getBackoffSeconds($this->step->retries);
-        }
 
-        $this->step->update([
-            'dispatch_after' => now()->addSeconds($backoffSeconds),
-        ]);
+            $this->step->update([
+                'dispatch_after' => now()->addSeconds($backoffSeconds),
+            ]);
+        }
 
         $this->retryJob();
     }
