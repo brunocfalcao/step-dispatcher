@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.2 - 2026-04-22
+
+### Improvements
+
+- [IMPROVED] Added `README.md` — user-facing orientation covering install, schedule wiring, quick-start job example, parent/child workflows, lifecycle hooks, throttling pattern, the `StaleStepsDetected` event, commands, groups/scaling, config, diagnostic logging, and states table.
+
 ## 1.11.1 - 2026-04-22
 
 ### Improvements
