@@ -6,6 +6,8 @@ namespace StepDispatcher\Commands;
 
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use ReflectionClass;
+use ReflectionException;
 use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Dispatched;
@@ -33,15 +35,6 @@ use StepDispatcher\Support\BaseCommand;
  */
 final class RecoverStaleStepsCommand extends BaseCommand
 {
-    protected $signature = 'steps:recover-stale
-                            {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
-                            {--release-locks : Also release dispatcher locks held beyond the threshold}
-                            {--step-threshold=300 : Seconds in Dispatched before a step counts as stuck}
-                            {--lock-threshold=30 : Seconds a dispatcher lock can be held before force-release}
-                            {--output : Display command output (silent by default)}';
-
-    protected $description = 'Recover stuck steps (Running zombies, Dispatched stalls) and release wedged dispatcher locks';
-
     /**
      * Buffer added to the job timeout before considering a Running step stale.
      */
@@ -51,6 +44,15 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * Fallback timeout when the job class cannot be resolved.
      */
     private const DEFAULT_TIMEOUT = 300;
+
+    protected $signature = 'steps:recover-stale
+                            {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
+                            {--release-locks : Also release dispatcher locks held beyond the threshold}
+                            {--step-threshold=300 : Seconds in Dispatched before a step counts as stuck}
+                            {--lock-threshold=30 : Seconds a dispatcher lock can be held before force-release}
+                            {--output : Display command output (silent by default)}';
+
+    protected $description = 'Recover stuck steps (Running zombies, Dispatched stalls) and release wedged dispatcher locks';
 
     public function handle(): int
     {
@@ -159,7 +161,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
         }
 
         try {
-            $reflection = new \ReflectionClass($step->class);
+            $reflection = new ReflectionClass($step->class);
             $property = $reflection->getProperty('timeout');
             $value = (int) $property->getDefaultValue();
 
@@ -168,7 +170,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
             // to DEFAULT_TIMEOUT. Without this, every such job is considered stale after
             // 60s (0 + BUFFER), which kills legitimate long-running work.
             return $value > 0 ? $value : self::DEFAULT_TIMEOUT;
-        } catch (\ReflectionException) {
+        } catch (ReflectionException) {
             return self::DEFAULT_TIMEOUT;
         }
     }
@@ -180,11 +182,11 @@ final class RecoverStaleStepsCommand extends BaseCommand
         }
 
         try {
-            $reflection = new \ReflectionClass($step->class);
+            $reflection = new ReflectionClass($step->class);
             $property = $reflection->getProperty('retries');
 
             return (int) $property->getDefaultValue();
-        } catch (\ReflectionException) {
+        } catch (ReflectionException) {
             return 2;
         }
     }
@@ -246,11 +248,15 @@ final class RecoverStaleStepsCommand extends BaseCommand
             ->first();
 
         // CRITICAL path: every stuck step was already promoted to priority/high
-        // on a previous run and is still Dispatched. Self-healing failed; the
-        // workers aren't picking from the priority queue either. Raise the
-        // alarm and don't try to promote again.
+        // on a previous run and is still Dispatched. Promotion by itself isn't
+        // enough — the Redis payload is gone (worker died between pop and state
+        // transition) so the queue-column rename achieves nothing. Alert the
+        // operator AND flip state back to Pending so the next dispatcher tick
+        // re-pushes them to the priority queue with a fresh payload.
         if ($alreadyPromoted > 0 && $alreadyPromoted === $count) {
-            $this->verboseError("CRITICAL: {$alreadyPromoted} priority step(s) still stuck after promotion.");
+            $requeued = $this->requeueDispatchedSteps($baseQuery);
+
+            $this->verboseError("CRITICAL: {$alreadyPromoted} priority step(s) still stuck after promotion; re-queued {$requeued}.");
 
             StaleStepsDetected::dispatch(
                 severity: 'critical',
@@ -260,6 +266,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 oldestStep: $oldestStep,
                 context: [
                     'step_threshold_seconds' => $thresholdSeconds,
+                    'requeued_count' => $requeued,
                     'hostname' => gethostname(),
                 ],
             );
@@ -277,7 +284,14 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 'queue' => 'priority',
             ]);
 
-        $this->verboseInfo("Promoted {$promoted} stale Dispatched step(s) to priority/high.");
+        // After promotion, transition state back to Pending on every stale
+        // Dispatched step (both newly-promoted and already-promoted). Without
+        // this, promotion is just a queue-column rename — step-dispatcher never
+        // re-pushes a step whose state is still Dispatched, so the priority
+        // queue stays empty and workers sit idle.
+        $requeued = $this->requeueDispatchedSteps($baseQuery);
+
+        $this->verboseInfo("Promoted {$promoted} stale Dispatched step(s) to priority/high; re-queued {$requeued}.");
 
         StaleStepsDetected::dispatch(
             severity: 'warning',
@@ -288,9 +302,39 @@ final class RecoverStaleStepsCommand extends BaseCommand
             oldestStep: $oldestStep,
             context: [
                 'step_threshold_seconds' => $thresholdSeconds,
+                'requeued_count' => $requeued,
                 'hostname' => gethostname(),
             ],
         );
+    }
+
+    /**
+     * Transition each stale Dispatched step back to Pending via the registered
+     * state-machine transition. Returns the number of rows flipped.
+     *
+     * Uses the transition (not a bulk `update`) so the state machine fires
+     * correctly — timers reset, retries increment, diagnostic log entry lands.
+     *
+     * Duplicate-execution risk if the original Redis payload resurfaces is
+     * absorbed by `BaseStepJob::prepareJobExecution()` which bails when it
+     * sees a step already in Running state.
+     *
+     * @param  \Illuminate\Database\Eloquent\Builder<Step>  $query
+     */
+    private function requeueDispatchedSteps($query): int
+    {
+        $requeued = 0;
+
+        (clone $query)->get()->each(function (Step $step) use (&$requeued): void {
+            if ($step->state instanceof Pending) {
+                return;
+            }
+
+            $step->state->transitionTo(Pending::class);
+            $requeued++;
+        });
+
+        return $requeued;
     }
 
     // ========================================================================

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.3 - 2026-04-22
+
+### Features
+
+- [NEW FEATURE] `Transitions\DispatchedToPending` — new state transition registered in `StepStatus`. Lets a step move back to `Pending` from `Dispatched` with retries incrementing (unless throttled), timers reset, and a diagnostic log entry. Enables re-queueing of orphaned Dispatched zombies that would otherwise stay stuck forever.
+
+### Improvements
+
+- [IMPROVED] `steps:recover-stale --recover-dispatched` — now actually re-queues stuck Dispatched steps instead of only renaming their queue column. After the promotion to `queue=priority + priority=high`, the command transitions each step `Dispatched → Pending` via the new transition, so the next dispatcher tick re-pushes them to Redis with a fresh payload. The CRITICAL branch (steps already on priority) also re-queues now, giving zombies another shot rather than silently dying. Duplicate-execution risk absorbed by `BaseStepJob::prepareJobExecution()` which bails when it sees the step already in Running state.
+
 ## 1.11.2 - 2026-04-22
 
 ### Improvements

@@ -17,6 +17,7 @@ use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Transitions\DispatchedToCancelled;
 use StepDispatcher\Transitions\DispatchedToFailed;
+use StepDispatcher\Transitions\DispatchedToPending;
 use StepDispatcher\Transitions\DispatchedToRunning;
 use StepDispatcher\Transitions\NotRunnableToCancelled;
 use StepDispatcher\Transitions\NotRunnableToPending;
@@ -51,6 +52,7 @@ abstract class StepStatus extends State
             ->allowTransition(Dispatched::class, Running::class, DispatchedToRunning::class)
             ->allowTransition(Dispatched::class, Cancelled::class, DispatchedToCancelled::class)
             ->allowTransition(Dispatched::class, Failed::class, DispatchedToFailed::class)
+            ->allowTransition(Dispatched::class, Pending::class, DispatchedToPending::class)
 
             ->allowTransition(Running::class, Completed::class, RunningToCompleted::class)
             ->allowTransition(Running::class, Stopped::class, RunningToStopped::class)
