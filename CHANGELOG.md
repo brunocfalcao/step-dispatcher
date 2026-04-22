@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.4 - 2026-04-23
+
+### Fixes
+
+- [BUG FIX] `StepsDispatcher::startDispatchCriteria()` — merged the stale-lock failsafe reset and the CAS acquire into a single atomic `UPDATE ... WHERE can_dispatch=true OR (can_dispatch=false AND updated_at < now-20s)`. Previous two-step path let two concurrent ticks both pass the failsafe check and overlap inside the dispatch critical section.
+- [BUG FIX] `PurgeStepsCommand` — purge is now tree-aware. Only deletes root blocks whose entire descendant tree is in a terminal state; long-running workflows with half-concluded children are no longer orphaned mid-tree.
+- [BUG FIX] `RecoverStaleStepsCommand::recoverStaleRunningSteps()` — clears `is_throttled` before transitioning `Running → Pending`, so worker-death recovery consumes a retry even when the step was flagged throttled. Without this, a step that kept timing out while throttled could recover forever without ever exhausting its retry budget.
+- [BUG FIX] `RecoverStaleStepsCommand::requeueDispatchedSteps()` — refreshes each step from DB inside the loop and skips if no longer in `Dispatched` state. Closes the race where a worker picks up a Dispatched step between the query snapshot and the transition call.
+- [BUG FIX] `StepDispatcher::transitionParentsToComplete()` — catch block now logs to `Log::error` with step context (id, class, block_uuid, child_block_uuid, group, exception class, message) instead of silently swallowing. Operators can now grep for stuck-parent transition failures.
+- [BUG FIX] `Step::childStepsAreConcluded()` / `childStepsAreConcludedFromMap()` — now treat every terminal child state (`Completed`, `Skipped`, `Cancelled`, `Failed`, `Stopped`) as "parent may leave Running". Previously only `Completed`/`Skipped` qualified, leaving parents with all-Cancelled children stuck `Running` forever since no later pass ever revisited the decision.
+
+### Tests
+
+- [NEW FEATURE] `tests/Feature/StartDispatchAtomicLockTest.php` — asserts the stale-lock recovery + CAS acquire happens in a single UPDATE.
+- [NEW FEATURE] `tests/Feature/PurgeStepsTreeSafetyTest.php` — four tree-safety scenarios covering half-concluded children, deep descendant trees, and mixed-age roots.
+- [NEW FEATURE] `tests/Feature/RecoverStaleThrottledRetryBudgetTest.php` — asserts `retries` advances and `is_throttled` clears when recovering a stale throttled Running step.
+- [NEW FEATURE] `tests/Feature/RequeueDispatchedRaceSafetyTest.php` — uses the `Step::retrieved` event to simulate a worker grabbing the step mid-requeue; asserts the refresh-in-loop skips it.
+- [NEW FEATURE] `tests/Feature/ParentResolutionContractsTest.php` — two contracts: transition exceptions reach `Log::error`, and parents with all-Cancelled children leave `Running` within one tick.
+
 ## 1.11.3 - 2026-04-22
 
 ### Features

@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Support;
 
+use Exception;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
+use RuntimeException;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Cancelled;
@@ -32,26 +35,6 @@ final class StepDispatcher
     {
         return Step::whereIn('state', [Pending::class, Dispatched::class, Running::class])
             ->exists();
-    }
-
-    /**
-     * Resolve the configured flag directory path.
-     *
-     * @throws \RuntimeException if flag_path is not configured
-     */
-    private static function flagDir(): string
-    {
-        $path = config('step-dispatcher.flag_path');
-
-        if (empty($path)) {
-            throw new \RuntimeException(
-                'step-dispatcher.flag_path is not configured. '
-                .'Set STEP_DISPATCHER_FLAG_PATH in your .env to an absolute directory path. '
-                .'All applications sharing the same database must point to the same path.'
-            );
-        }
-
-        return $path;
     }
 
     /**
@@ -296,8 +279,22 @@ final class StepDispatcher
                     $step->state->transitionTo(Completed::class);
                     $changed = true;
                 }
-            } catch (\Exception $e) {
-                // Log exception if needed
+            } catch (Exception $e) {
+                // Don't let a single parent's transition failure abort the
+                // whole sweep — other parents may still resolve cleanly. But
+                // surface the failure so operators can diagnose a parent
+                // stuck Running. Silent swallow here was the original bug:
+                // DB deadlocks, TransitionNotFound from stale state, etc.
+                // would vanish and the stuck parent looked like a mystery.
+                Log::error('transitionParentsToComplete failed for parent step', [
+                    'step_id' => $step->id,
+                    'class' => $step->class,
+                    'block_uuid' => $step->block_uuid,
+                    'child_block_uuid' => $step->child_block_uuid,
+                    'group' => $group,
+                    'exception' => get_class($e),
+                    'message' => $e->getMessage(),
+                ]);
             }
         }
 
@@ -657,7 +654,7 @@ final class StepDispatcher
                 FROM steps
                 WHERE child_block_uuid IN ({$placeholders})
                   AND child_block_uuid IS NOT NULL
-                  ".($group !== null ? "AND {$groupCol} = ?" : '')."
+                  ".($group !== null ? "AND {$groupCol} = ?" : '').'
 
                 UNION ALL
 
@@ -665,7 +662,7 @@ final class StepDispatcher
                 FROM steps s
                 INNER JOIN descendants d ON s.block_uuid = d.block_uuid
                 WHERE s.child_block_uuid IS NOT NULL
-                  ".($group !== null ? "AND s.{$groupCol} = ?" : '').'
+                  '.($group !== null ? "AND s.{$groupCol} = ?" : '').'
             )
             SELECT DISTINCT block_uuid FROM descendants
         ';
@@ -704,7 +701,7 @@ final class StepDispatcher
             try {
                 // Use proper state transition - triggers transition class handle() and observers
                 $step->state->transitionTo($toState);
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 // Log but continue - don't fail entire batch due to one invalid transition
             }
         }
@@ -850,5 +847,25 @@ final class StepDispatcher
         $key = $step->block_uuid.'_'.($step->index - 1).'_'.$type;
 
         return isset($concludedIndicesByBlock[$key]);
+    }
+
+    /**
+     * Resolve the configured flag directory path.
+     *
+     * @throws RuntimeException if flag_path is not configured
+     */
+    private static function flagDir(): string
+    {
+        $path = config('step-dispatcher.flag_path');
+
+        if (empty($path)) {
+            throw new RuntimeException(
+                'step-dispatcher.flag_path is not configured. '
+                .'Set STEP_DISPATCHER_FLAG_PATH in your .env to an absolute directory path. '
+                .'All applications sharing the same database must point to the same path.'
+            );
+        }
+
+        return $path;
     }
 }

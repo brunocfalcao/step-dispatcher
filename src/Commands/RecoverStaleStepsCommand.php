@@ -121,8 +121,15 @@ final class RecoverStaleStepsCommand extends BaseCommand
                     'retries' => $step->retries,
                 ]);
             } else {
+                // Worker-death recovery is NOT a throttle event — it is a
+                // retry attempt. If we left `is_throttled` set (inherited
+                // from an earlier legitimate throttle), `RunningToPending`
+                // would skip the retries++ and the step would loop forever
+                // here, never exhausting its budget. Clear the flag so the
+                // retry counter advances.
                 $step->update([
                     'error_message' => "Recovered by stale detector: Running for {$runningSeconds}s (threshold: {$staleThreshold}s), retrying ({$step->retries}/{$maxRetries})",
+                    'is_throttled' => false,
                 ]);
                 $step->state->transitionTo(Pending::class);
 
@@ -326,7 +333,17 @@ final class RecoverStaleStepsCommand extends BaseCommand
         $requeued = 0;
 
         (clone $query)->get()->each(function (Step $step) use (&$requeued): void {
-            if ($step->state instanceof Pending) {
+            // Re-read DB truth before firing the transition. The collection
+            // was hydrated moments ago; between that fetch and this
+            // iteration a legit worker can have popped the Redis payload
+            // and advanced the step Dispatched → Running. Acting on the
+            // stale in-memory snapshot would clobber the active run — reset
+            // started_at, burn a retry, force a duplicate execution. A
+            // refresh closes the window: if state has moved past Dispatched
+            // we leave it alone.
+            $step->refresh();
+
+            if (! ($step->state instanceof Dispatched)) {
                 return;
             }
 

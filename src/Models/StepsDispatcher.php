@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Models;
 
+use Closure;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -20,7 +21,13 @@ final class StepsDispatcher extends BaseModel
      *
      * @var callable|null
      */
-    protected static ?\Closure $recordTickWhenCallable = null;
+    protected static ?Closure $recordTickWhenCallable = null;
+
+    protected $casts = [
+        'can_dispatch' => 'boolean',
+        'last_tick_completed' => 'datetime',
+        'last_selected_at' => 'datetime',
+    ];
 
     /**
      * Register a callable that determines whether a tick should be persisted.
@@ -28,7 +35,7 @@ final class StepsDispatcher extends BaseModel
      *
      * Example: StepsDispatcher::recordTickWhen(fn (StepsDispatcherTicks $tick) => $tick->duration > 5000);
      */
-    public static function recordTickWhen(\Closure $callable): void
+    public static function recordTickWhen(Closure $callable): void
     {
         self::$recordTickWhenCallable = $callable;
     }
@@ -36,16 +43,10 @@ final class StepsDispatcher extends BaseModel
     /**
      * Get the registered tick recording callable.
      */
-    public static function getRecordTickWhenCallable(): ?\Closure
+    public static function getRecordTickWhenCallable(): ?Closure
     {
         return self::$recordTickWhenCallable;
     }
-
-    protected $casts = [
-        'can_dispatch' => 'boolean',
-        'last_tick_completed' => 'datetime',
-        'last_selected_at' => 'datetime',
-    ];
 
     /**
      * Selects a dispatch group using round-robin (delegates to getNextGroup).
@@ -130,19 +131,26 @@ final class StepsDispatcher extends BaseModel
             return false;
         }
 
-        // Failsafe: unlock if stuck > 20s
-        if (! $dispatcher->can_dispatch &&
-            $dispatcher->updated_at &&
-            $dispatcher->updated_at->lt(now()->subSeconds(20))
-        ) {
-            $dispatcher->can_dispatch = true;
-            $dispatcher->save();
-        }
-
         return DB::transaction(static function () use ($dispatcher, $group) {
+            // Acquire the dispatch lock with a single atomic UPDATE that also
+            // reclaims stale locks. The WHERE matches two paths:
+            //   • lock is currently free (can_dispatch = true) — normal acquire
+            //   • lock appears held but its holder has been dead > 20s
+            //     (can_dispatch = false AND updated_at < now()-20s) — failsafe
+            //
+            // Merging the failsafe reset with the acquire CAS closes the race
+            // window where two concurrent callers could both flip
+            // can_dispatch=true via a separate save() and then both slip
+            // through a second CAS — causing duplicate dispatch to Redis.
             $acquired = DB::table('steps_dispatcher')
                 ->where('id', $dispatcher->id)
-                ->where('can_dispatch', true)
+                ->where(static function ($q) {
+                    $q->where('can_dispatch', true)
+                        ->orWhere(static function ($q2) {
+                            $q2->where('can_dispatch', false)
+                                ->where('updated_at', '<', now()->subSeconds(20));
+                        });
+                })
                 ->update([
                     'can_dispatch' => false,
                     'updated_at' => now(),

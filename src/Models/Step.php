@@ -6,6 +6,7 @@ namespace StepDispatcher\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Spatie\ModelStates\HasStates;
 use StepDispatcher\Abstracts\BaseModel;
 use StepDispatcher\Abstracts\StepStatus;
 use StepDispatcher\Concerns\Step\HasActions;
@@ -18,7 +19,6 @@ use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
-use Spatie\ModelStates\HasStates;
 
 /**
  * @property int $id
@@ -234,7 +234,16 @@ final class Step extends BaseModel
                 continue;
             }
 
-            if (! in_array($stateClass, $this->concludedStepStates(), strict: true)) {
+            // A parent is ready to leave Running once every child reaches a
+            // terminal state — Completed, Skipped, Cancelled, Failed, or
+            // Stopped. Failed/Stopped cascades are handled by their own
+            // parent-resolution passes BEFORE this method is consulted, so
+            // by the time we reach here in `transitionParentsToComplete`,
+            // any Failed/Stopped outcome has already moved the parent to
+            // its matching terminal state. The only remaining case this
+            // method decides on is Cancelled-or-concluded — and for that,
+            // "child is in a terminal state" is the right signal.
+            if (! in_array($stateClass, self::terminalStepStates(), strict: true)) {
                 return false;
             }
 
@@ -262,7 +271,9 @@ final class Step extends BaseModel
                 continue;
             }
 
-            if (! in_array(get_class($child->state), $this->concludedStepStates(), strict: true)) {
+            // See `childStepsAreConcludedFromMap` for the rationale on
+            // using terminalStepStates() here instead of concluded-only.
+            if (! in_array(get_class($child->state), self::terminalStepStates(), strict: true)) {
                 return false;
             }
 

@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace StepDispatcher\Commands;
 
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\Models\StepsDispatcherTicks;
 use StepDispatcher\Support\BaseCommand;
@@ -39,17 +41,147 @@ final class PurgeStepsCommand extends BaseCommand
 
         $this->verboseInfo("Purging records older than {$days} days (before {$cutoff->toDateTimeString()})...");
 
-        // Purge steps_dispatcher_ticks in batches by ID
+        // Ticks have no tree structure — safe to purge by date alone.
         $ticksDeleted = $this->batchDeleteByDate('steps_dispatcher_ticks', $cutoff, $batchSize);
         $this->verboseInfo("Total deleted: {$ticksDeleted} tick records.");
 
-        // Purge steps in batches by ID
-        $stepsDeleted = $this->batchDeleteByDate('steps', $cutoff, $batchSize);
+        // Steps must be purged tree-aware. Deleting a root whose descendants
+        // are still live (long-running workflow, stuck leaf, branch spawned
+        // recently) orphans the subtree, breaks the workflow, and loses the
+        // audit trail. Only delete roots whose entire descendant tree is in
+        // a terminal state.
+        $stepsDeleted = $this->purgeTerminalTrees($cutoff);
         $this->verboseInfo("Total deleted: {$stepsDeleted} step records.");
 
         $this->verboseInfo('Purge completed.');
 
         return self::SUCCESS;
+    }
+
+    /**
+     * Delete step rows in each root tree that is (a) older than the cutoff
+     * and (b) fully terminal across the whole tree.
+     *
+     * Mirrors ArchiveStepsCommand's safety invariant without copying rows
+     * to an archive table — this is a purge.
+     */
+    private function purgeTerminalTrees(Carbon $cutoff): int
+    {
+        $rootUuids = $this->findPurgeableRoots($cutoff);
+
+        if ($rootUuids->isEmpty()) {
+            return 0;
+        }
+
+        $totalDeleted = 0;
+        $treesPurged = 0;
+
+        foreach ($rootUuids as $rootUuid) {
+            $treeUuids = $this->collectTree($rootUuid);
+
+            if (! $this->treeIsFullyTerminal($treeUuids)) {
+                continue;
+            }
+
+            $deleted = $this->deleteTree($treeUuids);
+            $totalDeleted += $deleted;
+            $treesPurged++;
+
+            if ($treesPurged % 100 === 0) {
+                $this->verboseInfo("Processed {$treesPurged} trees, deleted {$totalDeleted} steps so far...");
+            }
+        }
+
+        return $totalDeleted;
+    }
+
+    /**
+     * Root block candidates for purge: no parent step points at this block
+     * via child_block_uuid, every step in the block is terminal, and the
+     * block's newest activity is older than the cutoff.
+     *
+     * @return Collection<int, string>
+     */
+    private function findPurgeableRoots(Carbon $cutoff): Collection
+    {
+        $terminalStates = Step::terminalStepStates();
+        $placeholders = implode(',', array_fill(0, count($terminalStates), '?'));
+
+        return DB::table('steps as s')
+            ->select('s.block_uuid')
+            ->whereNotExists(function ($q) {
+                $q->select(DB::raw(1))
+                    ->from('steps as parent')
+                    ->whereColumn('parent.child_block_uuid', 's.block_uuid');
+            })
+            ->groupBy('s.block_uuid')
+            ->havingRaw("SUM(CASE WHEN s.state NOT IN ({$placeholders}) THEN 1 ELSE 0 END) = 0", $terminalStates)
+            ->havingRaw('MAX(COALESCE(s.completed_at, s.updated_at)) < ?', [$cutoff])
+            ->pluck('s.block_uuid');
+    }
+
+    /**
+     * Walk child_block_uuid recursively to collect every block_uuid in the
+     * tree rooted at $rootUuid.
+     *
+     * @return list<string>
+     */
+    private function collectTree(string $rootUuid): array
+    {
+        $allUuids = [$rootUuid];
+        $queue = [$rootUuid];
+
+        while (! empty($queue)) {
+            $childUuids = DB::table('steps')
+                ->whereIn('block_uuid', $queue)
+                ->whereNotNull('child_block_uuid')
+                ->pluck('child_block_uuid')
+                ->unique()
+                ->values()
+                ->toArray();
+
+            if (empty($childUuids)) {
+                break;
+            }
+
+            $allUuids = array_merge($allUuids, $childUuids);
+            $queue = $childUuids;
+        }
+
+        return $allUuids;
+    }
+
+    /**
+     * Verify every step across every block_uuid in the tree is terminal.
+     *
+     * @param  list<string>  $treeUuids
+     */
+    private function treeIsFullyTerminal(array $treeUuids): bool
+    {
+        return DB::table('steps')
+            ->whereIn('block_uuid', $treeUuids)
+            ->whereNotIn('state', Step::terminalStepStates())
+            ->doesntExist();
+    }
+
+    /**
+     * Delete every step row belonging to the given tree, chunked to keep
+     * the IN clause size and row locks short.
+     *
+     * @param  list<string>  $treeUuids
+     */
+    private function deleteTree(array $treeUuids): int
+    {
+        $chunks = array_chunk($treeUuids, 100);
+        $total = 0;
+
+        foreach ($chunks as $uuidChunk) {
+            $total += DB::table('steps')
+                ->whereIn('block_uuid', $uuidChunk)
+                ->delete();
+        }
+
+        return $total;
     }
 
     /**
