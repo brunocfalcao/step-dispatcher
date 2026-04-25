@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.6 - 2026-04-25
+
+### Fixes
+
+- [BUG FIX] `StepDispatcher::skipAllChildStepsOnParentAndChildSingleStep()` — phase 0 of the dispatcher tick now returns `true` ONLY when at least one descendant was actually transitioned. Two `return true` paths previously fired on no-op outcomes: (a) parent's child-block resolves to no descendants, and (b) batch transition runs against descendants that are all already in terminal states (rejected by the state machine, swallowed silently). Each false-positive return blocks the dispatch phase for the rest of the tick; under load this manifests as a complete per-group wedge, exactly the second wedge class in the 2026-04-25 production incident (eta / beta / iota / kappa stalled ~16h on Skipped parents whose `child_block_uuid` pointed at a fully-terminal child block).
+- [BUG FIX] `StepDispatcher::promoteResolveExceptionSteps()` — same return-true-on-no-op shape, racier trigger. The candidate-blocks scan and the resolve-exception step-id pluck are separate queries; a parallel tick / worker can promote the resolve-exception between the two. The phase now returns `false` when `$stepIds` ends up empty so the dispatch phase still runs.
+
+### Features
+
+- [NEW FEATURE] `step-dispatcher.dispatch.max_per_tick` config (env: `STEP_DISPATCHER_MAX_PER_TICK`, default `100`) — caps how many Pending rows a single tick hydrates per group. Without the cap, a group with thousands of Pending rows (wedge state, traffic spike) loaded all of them every second, blew the tick budget, and starved sibling groups. Drains in waves; consistent. Set to `0` to disable.
+- [NEW FEATURE] `RecoverStaleStepsCommand --watchdog-progress` (with `--progress-threshold=600`) — generalised stall detection beyond per-step zombies. Per group, if there are Pending steps but no terminal-state step has been updated within the threshold, fires a `group_no_progress` `StaleStepsDetected` event with severity=critical. Catches cleanup-phase wedges that don't surface a stuck step (the failure mode that hid the 2026-04-25 wedge for 16h while the existing detector saw nothing).
+
+### Tests
+
+- [NEW FEATURE] `tests/Feature/CleanupPhasesProgressTest.php` — pins the cleanup-phase contract: phase 0 must return `false` when the Skipped parent's child block is empty AND when every descendant is already terminal. Source-level guard against `promoteResolveExceptionSteps` regressing back to a bare `return true` after `batchTransitionSteps`.
+- [NEW FEATURE] `tests/Feature/DispatcherTickLimitTest.php` — pins the per-tick load-shedding contract via a 5-step fixture with `max_per_tick=2`.
+- [NEW FEATURE] `tests/Feature/GroupProgressWatchdogTest.php` — pins the group-progress watchdog: stalled groups fire the event, idle groups (zero Pending) do not.
+
 ## 1.11.5 - 2026-04-25
 
 ### Tests

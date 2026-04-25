@@ -31,6 +31,14 @@ return [
         // Callback for slow dispatch warnings (receives duration in ms)
         // Example: fn (int $durationMs) => Log::warning("Slow dispatch: {$durationMs}ms")
         'on_slow_dispatch' => null,
+
+        // Per-tick load shedding: cap how many Pending rows a single tick
+        // hydrates per group. Without this cap, a group that accumulates
+        // thousands of Pending rows (wedge state, traffic spike) loads them
+        // all into memory every second, blows the tick budget, and starves
+        // sibling groups. Drains in waves; consistent. Set to 0 to disable
+        // (legacy unbounded behaviour).
+        'max_per_tick' => env('STEP_DISPATCHER_MAX_PER_TICK', 100),
     ],
 
     /*

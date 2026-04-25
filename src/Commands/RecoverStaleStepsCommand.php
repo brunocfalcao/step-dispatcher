@@ -48,8 +48,10 @@ final class RecoverStaleStepsCommand extends BaseCommand
     protected $signature = 'steps:recover-stale
                             {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
                             {--release-locks : Also release dispatcher locks held beyond the threshold}
+                            {--watchdog-progress : Also alert on groups that have Pending steps but no recent terminal-state progress}
                             {--step-threshold=300 : Seconds in Dispatched before a step counts as stuck}
                             {--lock-threshold=30 : Seconds a dispatcher lock can be held before force-release}
+                            {--progress-threshold=600 : Seconds without terminal-state progress before a group counts as stalled}
                             {--output : Display command output (silent by default)}';
 
     protected $description = 'Recover stuck steps (Running zombies, Dispatched stalls) and release wedged dispatcher locks';
@@ -62,6 +64,10 @@ final class RecoverStaleStepsCommand extends BaseCommand
 
         if ((bool) $this->option('recover-dispatched')) {
             $this->recoverStaleDispatchedSteps((int) $this->option('step-threshold'));
+        }
+
+        if ((bool) $this->option('watchdog-progress')) {
+            $this->detectGroupNoProgress((int) $this->option('progress-threshold'));
         }
 
         $this->recoverStaleRunningSteps();
@@ -387,5 +393,74 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 'hostname' => gethostname(),
             ],
         );
+    }
+
+    // ========================================================================
+    // Group-progress watchdog (opt-in with --watchdog-progress)
+    // ========================================================================
+
+    /**
+     * Detect groups whose Pending queue is non-empty but where no terminal-
+     * state step has been updated within the threshold. The 2026-04-25 wedge
+     * proved the per-step detector is necessary but not sufficient — phase 0
+     * was returning `true` early on Skipped parents with empty / all-terminal
+     * child blocks, so dispatch never ran. No individual step looked stale,
+     * no Dispatched step was stuck, no lock was held. The detector found
+     * nothing while four groups silently bled for ~16h.
+     *
+     * Signal shape: per group, Pending count > 0 AND (no terminal-state step
+     * exists OR the most recent terminal `updated_at` is older than the
+     * threshold). Fires a `group_no_progress` event with severity=critical so
+     * the consuming app can route it to a high-priority pushover canonical.
+     * Idle groups (zero Pending, no work to drain) are explicitly suppressed
+     * to avoid paging on quiet 03:00 UTC windows.
+     */
+    private function detectGroupNoProgress(int $thresholdSeconds): void
+    {
+        $cutoff = now()->subSeconds($thresholdSeconds);
+
+        $pendingByGroup = Step::where('state', Pending::class)
+            ->whereNotNull('group')
+            ->groupBy('group')
+            ->selectRaw('`group` as g, COUNT(*) as c')
+            ->pluck('c', 'g');
+
+        if ($pendingByGroup->isEmpty()) {
+            return;
+        }
+
+        foreach ($pendingByGroup as $groupName => $pendingCount) {
+            $latestTerminal = Step::whereIn('state', Step::terminalStepStates())
+                ->where('group', $groupName)
+                ->max('updated_at');
+
+            $stalled = $latestTerminal === null
+                || \Illuminate\Support\Carbon::parse($latestTerminal)->lt($cutoff);
+
+            if (! $stalled) {
+                continue;
+            }
+
+            $this->verboseError(sprintf(
+                'CRITICAL: group "%s" has %d Pending step(s) but no terminal progress since %s (threshold: %ds)',
+                $groupName,
+                $pendingCount,
+                $latestTerminal ?? 'never',
+                $thresholdSeconds,
+            ));
+
+            StaleStepsDetected::dispatch(
+                severity: 'critical',
+                reason: 'group_no_progress',
+                count: (int) $pendingCount,
+                context: [
+                    'group' => $groupName,
+                    'pending_count' => (int) $pendingCount,
+                    'last_terminal_update' => $latestTerminal,
+                    'progress_threshold_seconds' => $thresholdSeconds,
+                    'hostname' => gethostname(),
+                ],
+            );
+        }
     }
 }

@@ -168,6 +168,16 @@ final class StepDispatcher
                         ->orWhere('dispatch_after', '<=', now());
                 });
 
+            // Cap per-tick hydration so a single overflowing group can't
+            // monopolise tick CPU and starve sibling groups. See the
+            // 2026-04-25 wedge: 5,000+ Pending rows per group hydrated each
+            // second blew the 1s tick budget and froze the entire dispatcher
+            // until manual intervention. 0 disables the cap (legacy).
+            $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
+            if ($maxPerTick > 0) {
+                $pendingQuery->limit($maxPerTick);
+            }
+
             $pendingSteps = $pendingQuery->get();
 
             // Priority Queue System: If any high-priority steps exist, filter to only those
@@ -303,6 +313,16 @@ final class StepDispatcher
 
     /**
      * If a parent was skipped, mark all its descendants as skipped.
+     *
+     * Returns true ONLY when at least one descendant was actually transitioned.
+     * The dispatcher's main loop interprets a true return from any cleanup
+     * phase as "we did work this tick, exit" — so returning true on a no-op
+     * path (empty child block, or child block populated only by descendants
+     * already in terminal states) blocks the dispatch phase forever for the
+     * affected group. That was the second wedge class in the 2026-04-25
+     * production incident: four groups stalled ~16h on a single long-Skipped
+     * parent each, whose `child_block_uuid` pointed at a block whose
+     * descendants had all already concluded.
      */
     public static function skipAllChildStepsOnParentAndChildSingleStep(?string $group = null): bool
     {
@@ -318,17 +338,23 @@ final class StepDispatcher
         $allChildBlocks = self::collectAllNestedChildBlocks($skippedParents, $group);
 
         if (empty($allChildBlocks)) {
-            return true;
+            return false;
         }
 
+        // Only consider non-terminal descendants — terminal -> Skipped is
+        // rejected by the state machine (silently swallowed by
+        // batchTransitionSteps) and counts as zero work done.
         $descendantIds = Step::whereIn('block_uuid', $allChildBlocks)
             ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->whereNotIn('state', Step::terminalStepStates())
             ->pluck('id')
             ->all();
 
-        if (! empty($descendantIds)) {
-            self::batchTransitionSteps($descendantIds, Skipped::class);
+        if (empty($descendantIds)) {
+            return false;
         }
+
+        self::batchTransitionSteps($descendantIds, Skipped::class);
 
         return true;
     }
@@ -587,9 +613,16 @@ final class StepDispatcher
             ->pluck('id')
             ->all();
 
-        if (! empty($stepIds)) {
-            self::batchTransitionSteps($stepIds, Pending::class);
+        if (empty($stepIds)) {
+            // Race: another tick / worker promoted the resolve-exception
+            // between the candidate-blocks scan above and this re-query.
+            // Returning true on this no-op path would block the dispatch
+            // phase for the rest of the tick — same wedge class as the
+            // skipAll* phase. Yield to the next phase instead.
+            return false;
         }
+
+        self::batchTransitionSteps($stepIds, Pending::class);
 
         return true;
     }
