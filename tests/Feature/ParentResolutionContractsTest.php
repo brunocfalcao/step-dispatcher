@@ -109,6 +109,70 @@ it('logs an exception when transitionParentsToComplete fails to transition a par
  * tick. Whether it lands on Completed, Cancelled, or Failed is a design
  * choice — the non-negotiable part is that it doesn't stay Running.
  */
+/**
+ * Z1 — pre-set child_block_uuid with zero children = zombie parent.
+ *
+ * If a step is created with `child_block_uuid` populated but no child
+ * row is ever inserted under that block, `childStepsAreConcludedFromMap`
+ * returns false (empty children → not concluded) and the parent stays
+ * Running forever. The dispatcher's `transitionParentsToComplete` pass
+ * inspects this parent every tick and burns budget without ever
+ * resolving it, eventually wedging the whole group.
+ *
+ * Contract: framework treats this as a permanent NOT-concluded — there
+ * is no way to distinguish "block intentionally empty" from "children
+ * not yet inserted, race in flight." So the consumer-side rule is
+ * non-negotiable: do NOT pre-set `child_block_uuid` at Step::create
+ * time. Use `$step->makeItAParent()` from inside compute() at the
+ * moment children are actually being spawned.
+ *
+ * This test locks the framework behavior down so any future "loosen
+ * the contract to auto-conclude empty blocks" change is caught — that
+ * would silently mask consumer-side zombies again.
+ */
+it('leaves a parent stuck Running when child_block_uuid is set but no children exist', function () {
+    $childBlock = (string) Str::uuid();
+    $parent = seedParentResolutionStep([
+        'child_block_uuid' => $childBlock,
+    ]);
+    forceState($parent, Running::class, ['started_at' => now()->subMinute()]);
+
+    StepDispatcher::transitionParentsToFailed('test-group');
+    StepDispatcher::transitionParentsToComplete('test-group');
+
+    $fresh = Step::find($parent->id);
+
+    expect($fresh->state)->toBeInstanceOf(
+        Running::class,
+        'framework intentionally treats empty child block as NOT concluded; the consumer is responsible for only pre-setting child_block_uuid when it has actually committed to spawning children'
+    );
+});
+
+/**
+ * Z2 — `makeItAParent()` is the only sanctioned way to elect a step as
+ * a parent. The helper MUST persist the generated UUID on the step row
+ * (so the dispatcher's parent-resolution pass can find children via
+ * `block_uuid = child_block_uuid`) and return that same UUID for the
+ * caller to use when creating children.
+ *
+ * Lock this contract down: if a future refactor makes the helper
+ * forget to write to the row (returning a UUID without persisting it),
+ * children would be inserted under a UUID the parent doesn't know
+ * about, recreating the zombie pattern from a different angle.
+ */
+it('persists child_block_uuid on the step row when makeItAParent is called', function () {
+    $parent = seedParentResolutionStep([]);
+
+    expect($parent->child_block_uuid)->toBeNull();
+
+    $childBlockUuid = $parent->makeItAParent();
+    $fresh = Step::find($parent->id);
+
+    expect($fresh->child_block_uuid)
+        ->not->toBeNull()
+        ->toBe($childBlockUuid);
+});
+
 it('does not leave a parent stuck in Running when every child ended Cancelled', function () {
     $childBlock = (string) Str::uuid();
     $parent = seedParentResolutionStep([

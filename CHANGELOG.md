@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.5 - 2026-04-25
+
+### Tests
+
+- [IMPROVED] `tests/Feature/ParentResolutionContractsTest` — added two regression tests pinning the parent-resolution contract that consumers must respect: (Z1) a parent with `child_block_uuid` set but zero children stays Running forever — locks the framework's intentional NOT-concluded behavior so a future "auto-conclude empty blocks" loosening is caught (it would silently mask consumer-side zombies); (Z2) `Step::makeItAParent()` persists the generated UUID on the row AND returns it — locks the helper round-trip so a refactor that returns the UUID without writing it can't recreate the zombie pattern from a different angle.
+
 ## 1.11.4 - 2026-04-23
 
 ### Fixes
