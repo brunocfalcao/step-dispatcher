@@ -209,7 +209,8 @@ The package itself never notifies anyone — your app decides the channel.
 | `steps:recover-stale` | Recovers Running zombies (worker died mid-job). |
 | `steps:recover-stale --recover-dispatched --release-locks` | Also promotes stuck Dispatched steps to priority queue and force-releases wedged dispatcher locks. Fires `StaleStepsDetected`. |
 | `steps:archive --duration=5` | Moves fully-resolved trees older than N days to `steps_archive`. |
-| `steps:purge --days=30` | Hard-deletes `steps` / `steps_dispatcher_ticks` rows older than N days. |
+| `steps:purge --days=30` | Hard-deletes `steps` / `steps_dispatcher_ticks` rows older than N days (tree-aware on `steps`). |
+| `steps:purge --only-archive --days=30` | Hard-deletes ONLY `steps_archive` rows older than N days. Leaves `steps` and ticks untouched. Pair with `steps:archive` for a two-stage retention pipeline. |
 | `steps:purge --ticks` | Deletes historical ticks that don't pass the `recordTickWhen` filter. |
 
 All commands silent by default. Add `--output` for verbose stdout.

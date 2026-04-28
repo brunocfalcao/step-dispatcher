@@ -17,6 +17,7 @@ final class PurgeStepsCommand extends BaseCommand
     protected $signature = 'steps:purge
         {--days=30 : Keep records from the last N days (default: 30)}
         {--ticks : Purge ticks using the recordTickWhen callable (ignores --days for ticks)}
+        {--only-archive : Purge ONLY the steps_archive table (date-based delete). Leaves the live steps table and ticks untouched.}
         {--output : Display command output (silent by default)}';
 
     protected $description = 'Purge old steps and ticks records, keeping only the last N days.';
@@ -38,6 +39,23 @@ final class PurgeStepsCommand extends BaseCommand
 
         $cutoff = Carbon::now()->subDays($days);
         $batchSize = 10000;
+
+        // Archive-only mode is the cooled-down companion to
+        // ArchiveStepsCommand. Archive moves terminal trees from `steps`
+        // to `steps_archive` daily; eventually the archive needs to be
+        // trimmed too. Because steps_archive is populated only by the
+        // archive command (which guarantees every row is part of a
+        // fully-terminal tree), it has no tree-safety constraint —
+        // a flat date-based delete is correct.
+        if ($this->option('only-archive')) {
+            $this->verboseInfo("Purging steps_archive rows older than {$days} days (before {$cutoff->toDateTimeString()})...");
+
+            $archiveDeleted = $this->batchDeleteByDate('steps_archive', $cutoff, $batchSize);
+            $this->verboseInfo("Total deleted: {$archiveDeleted} archive records.");
+            $this->verboseInfo('Archive purge completed.');
+
+            return self::SUCCESS;
+        }
 
         $this->verboseInfo("Purging records older than {$days} days (before {$cutoff->toDateTimeString()})...");
 

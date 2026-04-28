@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.7 - 2026-04-28
+
+### Features
+
+- [NEW FEATURE] `steps:purge --only-archive` flag — date-based delete on `steps_archive` only, leaves the live `steps` table and ticks untouched. Designed as the cooled-down companion to `steps:archive`: archive moves terminal trees daily, this purge eventually drops them from archive once they're past the retention window. Because `steps_archive` is populated only by `ArchiveStepsCommand` (which guarantees every row is part of a fully-terminal tree), no tree-walk safety check is needed — flat date-based delete is correct. Default mode (no flag) is unchanged.
+
+### Tests
+
+- [NEW FEATURE] `tests/Feature/PurgeOnlyArchiveTest.php` — 5 cases pinning the new contract: deletes archive rows older than `--days`, leaves live `steps` table untouched, leaves ticks untouched, validates `--days >= 1`, regression guard that default mode still walks the live table.
+
 ## 1.11.6 - 2026-04-25
 
 ### Fixes
