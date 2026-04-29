@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.10 - 2026-04-29
+
+### Improvements
+
+- [IMPROVED] Per-tick step selection now orders strictly by `id ASC` (FIFO), dropping the prior `is_throttled ASC` lead key. Without an explicit `id ASC`, MySQL was returning the same deterministic primary-key sample every tick, so any ungated cluster at the front of the table could never get sampled when those slots were filled by `canTransition()=false` siblings. The comment now documents the intent — explicit FIFO, no implicit primary-key ordering reliance.
+
 ## 1.11.9 - 2026-04-29
 
 ### Improvements

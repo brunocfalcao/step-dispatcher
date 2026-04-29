@@ -167,11 +167,11 @@ final class StepDispatcher
                     $q->whereNull('dispatch_after')
                         ->orWhere('dispatch_after', '<=', now());
                 })
-                // Non-throttled rows first so an external-API rate-limit pile
-                // (e.g. 5,000 throttled Apollo steps) cannot monopolise the
-                // per-tick LIMIT sample and starve unrelated work. Within each
-                // throttle bucket, oldest-first preserves FIFO fairness.
-                ->orderBy('is_throttled', 'asc')
+                // Explicit FIFO ordering. Without an orderBy MySQL returns the
+                // same deterministic primary-key sample every tick, so any
+                // ungated cluster at the front of the table can never get
+                // sampled if those slots are filled by canTransition()=false
+                // siblings. Explicit id ASC documents the intent.
                 ->orderBy('id', 'asc');
 
             // Cap per-tick hydration so a single overflowing group can't
