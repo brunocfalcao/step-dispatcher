@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.9 - 2026-04-29
+
+### Improvements
+
+- [IMPROVED] Per-tick step selection now orders non-throttled rows ahead of throttled ones (`orderBy('is_throttled')` then `orderBy('id')`). Without it, a large pile of throttled rows from a single rate-limited external API (e.g. 5,000 Apollo steps waiting on a window reset) could monopolise the per-tick LIMIT sample and starve unrelated work. Within each throttle bucket, oldest-first preserves FIFO fairness.
+
+## 1.11.8 - 2026-04-29
+
+### Improvements
+
+- [IMPROVED] Added `@property` docblock to `StepsDispatcherTicks` (id, group, progress, started_at, completed_at, duration, created_at, updated_at). Resolves Larastan level-max access on the `duration` column from downstream callers (e.g. `StepsDispatcher::recordTickWhen` closures in app providers).
+
 ## 1.11.7 - 2026-04-28
 
 ### Features

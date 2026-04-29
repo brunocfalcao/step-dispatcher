@@ -166,7 +166,13 @@ final class StepDispatcher
                 ->where(static function ($q) {
                     $q->whereNull('dispatch_after')
                         ->orWhere('dispatch_after', '<=', now());
-                });
+                })
+                // Non-throttled rows first so an external-API rate-limit pile
+                // (e.g. 5,000 throttled Apollo steps) cannot monopolise the
+                // per-tick LIMIT sample and starve unrelated work. Within each
+                // throttle bucket, oldest-first preserves FIFO fairness.
+                ->orderBy('is_throttled', 'asc')
+                ->orderBy('id', 'asc');
 
             // Cap per-tick hydration so a single overflowing group can't
             // monopolise tick CPU and starve sibling groups. See the
