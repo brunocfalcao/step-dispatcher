@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.11 - 2026-05-01
+
+### Improvements
+
+- [IMPROVED] `step-dispatcher.queues.valid` now includes `'user-data-stream'`. Without the entry, `StepObserver::saving()` silently rewrites unknown queue values to `'default'`, which buried the new Binance user-data Steps behind the unrelated default-queue backlog. Generic addition — any host app on the package that wants a per-feature queue can keep extending this list.
+
 ## 1.11.10 - 2026-04-29
 
 ### Improvements
