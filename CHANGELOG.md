@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.12 - 2026-05-01
+
+### Improvements
+
+- [IMPROVED] `StepDispatcher::dispatch()` now uses two-pass selection: pass 1 fetches ALL `priority='high'` Pending steps with no per-tick cap, pass 2 falls back to the capped non-priority FIFO only when no priority work exists. Previously, a `priority='high'` step inserted after a large non-priority backlog could land outside the `max_per_tick` fetch window and stay invisible to the dispatcher — defeating the whole point of priority routing. Production trigger (2026-05-01): a 1700-row hourly leverage-bracket batch buried an observer-dispatched `PrepareOrderCorrectionJob` for ~8 minutes. The cap still bounds non-priority workloads.
+- [IMPROVED] `StepObserver::saving()` now propagates `priority='high'` from a parent step to its child block. When a new step's `block_uuid` matches an existing parent's `child_block_uuid` and the parent is `priority='high'`, the new step inherits `priority='high'` (unless it explicitly set its own value — explicit always wins). Without this, priority routing was one-step-deep: a `priority='high'` parent's spawned children fell back to `priority=null` and joined the normal FIFO group, stalling the rest of the workflow chain. Production trigger (2026-05-01): an observer-dispatched `PreparePositionReplacementJob` (priority='high') spawned `VerifyPositionExistsOnExchangeJob` and `SmartReplaceOrdersJob` children at `priority=null`; the latter landed in group `beta` behind 150 pending non-priority steps and stalled the SL recreation.
+
+### Tests
+
+- [NEW FEATURE] `tests/Feature/PriorityBypassesTickLimitTest.php` — pins the contract that `priority='high'` steps are promoted regardless of `max_per_tick` and FIFO position, plus a sibling regression test that non-priority workloads still respect the cap.
+- [NEW FEATURE] `tests/Feature/PriorityInheritanceTest.php` — pins inheritance: child inherits `priority='high'` from a priority parent, non-priority parent does not propagate, explicit child priority overrides inheritance, and propagation chains through multi-level workflows (root → child → grandchild).
+
 ## 1.11.11 - 2026-05-01
 
 ### Improvements

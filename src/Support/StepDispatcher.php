@@ -161,34 +161,57 @@ final class StepDispatcher
             // Distribute the steps to be dispatched (only if no cancellations or failures happened)
             $dispatchedSteps = collect();
 
-            $pendingQuery = Step::pending()
+            // Two-pass selection so that priority='high' steps are never
+            // hidden behind a non-priority backlog that fills the
+            // max_per_tick window:
+            //
+            //   Pass 1 — fetch ALL priority='high' Pending steps. No cap.
+            //     Priority is the framework's escape hatch for
+            //     latency-sensitive workflows (observer-dispatched
+            //     corrections, position closes, WAP). They must always
+            //     be visible to the dispatcher regardless of how many
+            //     non-priority rows sit in front of them in FIFO order.
+            //     Production trigger: 2026-05-01, a 1700-row hourly
+            //     leverage-bracket batch buried an observer-dispatched
+            //     PrepareOrderCorrectionJob for ~8 minutes — the step
+            //     was Pending the whole time, never reaching the
+            //     dispatcher's 100-row visible window.
+            //
+            //   Pass 2 — only when no priority work exists, fetch up to
+            //     max_per_tick non-priority Pending steps. The cap still
+            //     protects the dispatcher from runaway non-priority
+            //     groups (the 2026-04-25 wedge).
+            //
+            // Trade-off: if a priority flood ever materialises (5,000+
+            // priority='high' rows in one tick), the cap can be defeated.
+            // In practice priority='high' is reserved for individual
+            // observer-dispatched workflow steps — not bulk batches.
+            // If that assumption ever breaks, add a separate
+            // priority_max_per_tick knob.
+
+            $baseQuery = static fn () => Step::pending()
                 ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
                 ->where(static function ($q) {
                     $q->whereNull('dispatch_after')
                         ->orWhere('dispatch_after', '<=', now());
                 })
-                // Explicit FIFO ordering. Without an orderBy MySQL returns the
-                // same deterministic primary-key sample every tick, so any
-                // ungated cluster at the front of the table can never get
-                // sampled if those slots are filled by canTransition()=false
-                // siblings. Explicit id ASC documents the intent.
                 ->orderBy('id', 'asc');
 
-            // Cap per-tick hydration so a single overflowing group can't
-            // monopolise tick CPU and starve sibling groups. See the
-            // 2026-04-25 wedge: 5,000+ Pending rows per group hydrated each
-            // second blew the 1s tick budget and froze the entire dispatcher
-            // until manual intervention. 0 disables the cap (legacy).
-            $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
-            if ($maxPerTick > 0) {
-                $pendingQuery->limit($maxPerTick);
-            }
+            $prioritySteps = $baseQuery()
+                ->where('priority', 'high')
+                ->get();
 
-            $pendingSteps = $pendingQuery->get();
+            if ($prioritySteps->isNotEmpty()) {
+                $pendingSteps = $prioritySteps;
+            } else {
+                $pendingQuery = $baseQuery();
 
-            // Priority Queue System: If any high-priority steps exist, filter to only those
-            if ($pendingSteps->contains('priority', 'high')) {
-                $pendingSteps = $pendingSteps->where('priority', 'high')->values();
+                $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
+                if ($maxPerTick > 0) {
+                    $pendingQuery->limit($maxPerTick);
+                }
+
+                $pendingSteps = $pendingQuery->get();
             }
 
             // Build cache to avoid N+1 queries in PendingToDispatched::canTransition()

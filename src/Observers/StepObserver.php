@@ -10,7 +10,6 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
-
 use StepDispatcher\Support\StepDispatcher;
 
 final class StepObserver
@@ -74,6 +73,41 @@ final class StepObserver
         // This ensures the step can be picked up by any worker server, not tied to a specific host
         if ($step->state instanceof Pending) {
             $step->hostname = null;
+        }
+
+        // Priority inheritance:
+        // Child steps spawned by a `priority='high'` parent inherit
+        // priority='high' so the entire workflow chain stays on the
+        // priority lane. Without this, priority routing is exactly one
+        // step deep — every child step would fall back to priority=null
+        // and get blocked behind any normal-FIFO backlog, defeating the
+        // latency isolation that priority='high' was meant to provide.
+        //
+        // Runs in `saving` (not `creating`) because Eloquent fires
+        // `saving` before `creating`, and the priority→queue routing
+        // below depends on the inherited value being set first.
+        //
+        // The parent lookup mirrors workflow_id inheritance: a parent
+        // is the step whose `child_block_uuid` matches this step's
+        // `block_uuid`. Only inherits when `priority` is null on the
+        // new step — explicit priority on the child wins (a child can
+        // opt out of priority by passing 'normal' / 'low' explicitly).
+        //
+        // Production trigger (2026-05-01): an observer-dispatched
+        // PreparePositionReplacementJob (priority='high') ran on the
+        // priority queue, spawned VerifyPositionExistsOnExchangeJob
+        // and SmartReplaceOrdersJob children — both at priority=null.
+        // SmartReplaceOrdersJob landed in group `beta` behind 150
+        // pending non-priority steps, stalling the SL recreation.
+        if (! $step->exists && $step->priority === null && ! empty($step->block_uuid)) {
+            $parentStep = Step::query()
+                ->where('child_block_uuid', $step->block_uuid)
+                ->where('priority', 'high')
+                ->first();
+
+            if ($parentStep !== null) {
+                $step->priority = 'high';
+            }
         }
 
         // Automatically route high priority steps to the priority queue
