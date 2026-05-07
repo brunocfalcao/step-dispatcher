@@ -7,6 +7,10 @@ use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\Support\StepDispatcher;
 
+beforeEach(function () {
+    config()->set('step-dispatcher.flag_path', sys_get_temp_dir());
+});
+
 it('can transition NotRunnable steps to Cancelled when parent is cancelled', function () {
     // Create a parent step that will be cancelled
     $parentStep = Step::create([

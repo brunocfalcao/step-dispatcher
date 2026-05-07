@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.13 - 2026-05-07
+
+### Fixes
+
+- [BUG FIX] `StepDispatcher::dispatch()` priority pass-1 fall-through. Previously, when `priority='high'` Pending rows existed but NONE of them were dispatchable this tick (e.g. an orphan priority step whose previous index is missing — a poison pill), the dispatcher skipped pass 2 entirely and the entire group's non-priority backlog starved. Pass 2 now runs whenever pass 1 produces zero *dispatchable* work, not only zero rows fetched. Production trigger (2026-05-07, group `eta`): one undispatchable `priority='high'` step (`UpdatePositionStatusJob` at `index=9` in a block with no `index=8` row) wedged 660+ non-priority Pending rows for 11+ minutes before the group-stall watchdog fired.
+- [IMPROVED] Extracted `StepDispatcher::buildStepsCache()` so the priority and non-priority passes share a single cache-construction helper instead of duplicating the three-query block. Pure refactor — same N+1 protection, same semantics.
+
+### Tests
+
+- [NEW FEATURE] `tests/Feature/PriorityFallthroughTest.php` — pins the contract that an undispatchable `priority='high'` step does not starve a dispatchable non-priority backlog. Constructs an orphan poison pill at `index=2` with no `index=1` and three dispatchable non-priority orphans; expects the poison pill to stay Pending and all three non-priority steps to be promoted in the same tick.
+- [BUG FIX] `tests/Feature/NotRunnableToCancelledTransitionTest.php` now sets `step-dispatcher.flag_path` in `beforeEach` so `StepDispatcher::dispatch()` no longer throws `RuntimeException` mid-test. Same pattern as every other feature test in the suite.
+
 ## 1.11.12 - 2026-05-01
 
 ### Improvements

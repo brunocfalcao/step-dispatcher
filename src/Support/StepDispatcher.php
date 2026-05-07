@@ -201,9 +201,22 @@ final class StepDispatcher
                 ->where('priority', 'high')
                 ->get();
 
-            if ($prioritySteps->isNotEmpty()) {
-                $pendingSteps = $prioritySteps;
-            } else {
+            $pendingSteps = $prioritySteps;
+            $stepsCache = self::buildStepsCache($pendingSteps);
+            $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
+
+            // Pass 1 fall-through: when priority='high' rows exist but NONE
+            // of them are actually dispatchable this tick (e.g. an orphan
+            // priority step whose previous index is missing — a poison
+            // pill), the original implementation skipped pass 2 entirely
+            // and the entire group's non-priority backlog starved.
+            // Production trigger (2026-05-07, group eta): one undispatchable
+            // priority='high' step wedged 660+ Pending rows for 11+ minutes
+            // before the group-stall watchdog fired.
+            //
+            // Contract: pass 2 must run whenever pass 1 produces zero
+            // *dispatchable* work — not only when pass 1 fetches zero rows.
+            if ($prioritySteps->isEmpty() || $dispatchableSteps->isEmpty()) {
                 $pendingQuery = $baseQuery();
 
                 $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
@@ -212,40 +225,9 @@ final class StepDispatcher
                 }
 
                 $pendingSteps = $pendingQuery->get();
+                $stepsCache = self::buildStepsCache($pendingSteps);
+                $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
             }
-
-            // Build cache to avoid N+1 queries in PendingToDispatched::canTransition()
-            $stepsCache = null;
-            $blockUuids = $pendingSteps->pluck('block_uuid')->unique()->values();
-
-            if ($blockUuids->isNotEmpty()) {
-                // Query 1: Get parent steps (for isChild/getParentStep checks)
-                $parentsByChildBlock = Step::whereIn('child_block_uuid', $blockUuids)
-                    ->get()
-                    ->keyBy('child_block_uuid');
-
-                // Query 2: Get all steps in these blocks (for previousIndexIsConcluded)
-                $stepsByBlockAndIndex = Step::whereIn('block_uuid', $blockUuids)
-                    ->get()
-                    ->groupBy(static fn (Step $s): string => $s->block_uuid.'_'.$s->index);
-
-                // Query 3: Get blocks with pending resolve-exceptions
-                $pendingResolveExceptions = Step::whereIn('block_uuid', $blockUuids)
-                    ->where('type', 'resolve-exception')
-                    ->where('state', Pending::class)
-                    ->pluck('block_uuid')
-                    ->flip()
-                    ->all();
-
-                $stepsCache = [
-                    'parents_by_child_block' => $parentsByChildBlock,
-                    'steps_by_block_and_index' => $stepsByBlockAndIndex,
-                    'pending_resolve_exceptions' => $pendingResolveExceptions,
-                ];
-            }
-
-            // Batch pre-compute which steps can be dispatched (eliminates per-step canTransition() calls)
-            $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
 
             // Apply transitions for all dispatchable steps
             $dispatchableSteps->each(static function (Step $step) use ($dispatchedSteps, $stepsCache) {
@@ -266,7 +248,7 @@ final class StepDispatcher
                 $group ?? 'NULL',
                 $dispatchableSteps->count(),
                 $pendingSteps->count(),
-                $blockUuids->count(),
+                $pendingSteps->pluck('block_uuid')->unique()->count(),
             ));
         } finally {
             StepsDispatcher::endDispatch($progress, $group);
@@ -767,6 +749,49 @@ final class StepDispatcher
                 // Log but continue - don't fail entire batch due to one invalid transition
             }
         }
+    }
+
+    /**
+     * Build the per-tick lookup cache the dispatcher needs to avoid N+1
+     * canTransition() queries: parents keyed by child block, every step in
+     * the touched blocks keyed by block+index, and the set of blocks that
+     * have a Pending resolve-exception step.
+     *
+     * Returns null when there are no pending steps to evaluate; callers
+     * pass the null straight into computeDispatchableSteps which short-
+     * circuits to an empty collection.
+     *
+     * @param  Collection<int, Step>  $pendingSteps
+     * @return array<string, mixed>|null
+     */
+    public static function buildStepsCache(Collection $pendingSteps): ?array
+    {
+        $blockUuids = $pendingSteps->pluck('block_uuid')->unique()->values();
+
+        if ($blockUuids->isEmpty()) {
+            return null;
+        }
+
+        $parentsByChildBlock = Step::whereIn('child_block_uuid', $blockUuids)
+            ->get()
+            ->keyBy('child_block_uuid');
+
+        $stepsByBlockAndIndex = Step::whereIn('block_uuid', $blockUuids)
+            ->get()
+            ->groupBy(static fn (Step $s): string => $s->block_uuid.'_'.$s->index);
+
+        $pendingResolveExceptions = Step::whereIn('block_uuid', $blockUuids)
+            ->where('type', 'resolve-exception')
+            ->where('state', Pending::class)
+            ->pluck('block_uuid')
+            ->flip()
+            ->all();
+
+        return [
+            'parents_by_child_block' => $parentsByChildBlock,
+            'steps_by_block_and_index' => $stepsByBlockAndIndex,
+            'pending_resolve_exceptions' => $pendingResolveExceptions,
+        ];
     }
 
     /**
