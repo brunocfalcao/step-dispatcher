@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.12.0 - 2026-05-08
+
+### Features
+
+- [NEW FEATURE] **Table-prefix isolation (`--prefix=<name>`).** The dispatcher can now run as N completely isolated ecosystems against the same database. Each ecosystem owns its own four-table set (`{prefix}steps`, `{prefix}steps_dispatcher`, `{prefix}steps_dispatcher_ticks`, `{prefix}steps_archive`) with prefix-interpolated index names. Same dispatcher code runs against any prefix — `RuntimeContext` (a scoped singleton) holds the active prefix on a stack; every Step / dispatcher query resolves its table via `tableName()` helpers that read that stack.
+- [NEW FEATURE] **`Steps::usingPrefix($prefix, $closure)` facade method** for closure-scoped pushes (push on entry, pop in finally — a throw inside the closure still balances the stack). Plus `Steps::normalise($prefix)` for the trailing-underscore canonicalisation (`'trading'` → `'trading_'`).
+- [NEW FEATURE] **`Step::prefix($name)->create([...])` builder** for single-call explicit overrides — lets host code fan out across both ecosystems from the same call site without nesting `usingPrefix` blocks.
+- [NEW FEATURE] **`steps:install --prefix=<name>` artisan command** creates the four prefixed tables programmatically with prefix-interpolated index names. Per-table idempotent: existing tables are skipped, missing ones created (re-run heals partial drops). The dispatcher group seed (alpha..kappa) only fires when the dispatcher table is genuinely created so re-runs cannot duplicate seeded rows. Empty prefix is rejected (that's what the package's stock migrations install).
+- [NEW FEATURE] **Universal `--prefix=` CLI option** injected by `BaseCommand::__construct()` onto every subclass after Laravel's signature-parsing pass. The option pushes / pops via `RuntimeContext` for the duration of `execute()`.
+
+### Improvements
+
+- [IMPROVED] **`BaseStepJob::__unserialize()` overridden** to push the prefix from the raw payload BEFORE Laravel's `SerializesModels` trait restores the `$step` model. Without this gate, the trait runs `Step::find($id)` deserialize-time against the default table for a row that lives in `{prefix}steps`, fails with `ModelNotFoundException`, and every prefixed job lands in `failed_jobs`. `handle()` and `failed()` re-push the prefix for their own execution bodies, balanced by `pop()` in finally.
+- [IMPROVED] **`DispatchesJobs::dispatchSingleStep()` stamps `$job->stepPrefix`** with the ambient prefix at queue time so the serialised job payload travels with the prefix. Worker-side propagation guarantees the chain (parent → child via `Step::create()` inside `compute()`) inherits the ambient prefix end-to-end.
+- [IMPROVED] **All cron commands prefix-aware end-to-end.** `DispatchStepsCommand`, `RecoverStaleStepsCommand`, `ArchiveStepsCommand`, `PurgeStepsCommand`, `InstallPrefixedTablesCommand` resolve every source / destination table through the active prefix. The recursive child-block CTE in `StepDispatcher::collectAllNestedChildBlocks()` interpolates `Step::tableName()` instead of the literal `FROM steps`. Raw `INSERT INTO steps_archive ... SELECT ... FROM steps` in `ArchiveStepsCommand` rebuilt to use both `StepsArchive::tableName()` and `Step::tableName()`.
+- [IMPROVED] **Per-prefix flag file path** — `StepDispatcher::activate/deactivate/isActive` writes `{flag_dir}/{prefix}active.flag` so a prefixed dispatcher going idle does NOT deactivate other prefixes (the previous shared `active.flag` was a cross-prefix coupling hazard).
+- [IMPROVED] **All cache keys carrying group-scoped state are now prefix-scoped:** `current_tick_id:{prefix}{group}`, `steps_dispatcher_tick_start:{prefix}{group}`, `dispatcher:saturation:{prefix}{group}:{bucket}`. Two prefixed dispatchers sharing a group name (alpha, beta, …) never stomp each other.
+- [IMPROVED] **`Step::scopePending` model-aware** — reads `$query->getModel()->getTable()` instead of the literal `'steps.state'` alias, so the scope works under any prefix.
+- [IMPROVED] **New `StepsArchive` Eloquent model** with the same `getTable()` / `tableName()` resolution as `Step`. Used by `ArchiveStepsCommand` to compose the destination table name without string-literal hardcodes.
+
+### Tests
+
+- [NEW FEATURE] **29 new prefix-only tests** under `tests/Feature/Prefix/`: `RuntimeContextTest`, `PrefixIsolationTest` (incl. idempotent installer + heal-pass cases), `PrefixCacheKeysAndFlagTest`, `PrefixRecursiveCteTest`, `PrefixWorkerPayloadTest`, `PrefixedArchivePurgeTest`, `PrefixedTickFullLifecycleTest`. Global `afterEach(RuntimeContext::reset())` in `tests/Pest.php` keeps any test that forgets to pop from polluting the next. Whole package suite at default prefix `''`: 60 green (31 original + 29 new).
+
 ## 1.11.14 - 2026-05-08
 
 ### Improvements

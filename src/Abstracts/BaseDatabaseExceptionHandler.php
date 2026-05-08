@@ -59,6 +59,14 @@ abstract class BaseDatabaseExceptionHandler
         return $this->matchesErrorPattern($e, 'ignorableMessages', 'ignorableSqlStates', 'ignorableErrorCodes');
     }
 
+    final public function getBackoffSeconds(int $retryAttempt): int
+    {
+        $multiplier = property_exists($this, 'backoffMultiplier') ? $this->backoffMultiplier : 2;
+        $maxBackoff = property_exists($this, 'maxBackoffSeconds') ? $this->maxBackoffSeconds : 120;
+
+        return min((int) ($this->backoffSeconds * ($multiplier ** $retryAttempt)), $maxBackoff);
+    }
+
     private function matchesErrorPattern(
         QueryException $e,
         string $messagesProp,
@@ -87,13 +95,5 @@ abstract class BaseDatabaseExceptionHandler
         }
 
         return false;
-    }
-
-    public function getBackoffSeconds(int $retryAttempt): int
-    {
-        $multiplier = property_exists($this, 'backoffMultiplier') ? $this->backoffMultiplier : 2;
-        $maxBackoff = property_exists($this, 'maxBackoffSeconds') ? $this->maxBackoffSeconds : 120;
-
-        return min((int) ($this->backoffSeconds * ($multiplier ** $retryAttempt)), $maxBackoff);
     }
 }

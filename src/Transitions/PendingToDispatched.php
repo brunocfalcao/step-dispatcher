@@ -4,12 +4,12 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Transitions;
 
+use Spatie\ModelStates\Transition;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
-use Spatie\ModelStates\Transition;
 
 final class PendingToDispatched extends Transition
 {
@@ -112,8 +112,11 @@ final class PendingToDispatched extends Transition
         $this->step->state = new Dispatched($this->step); // Transition to Dispatched state
 
         // If we have a tick id, let's update the step with it.
-        // Cache key includes group suffix to match StepsDispatcher::startDispatch()
-        $cacheSuffix = $this->step->group ?? 'global';
+        // Cache key includes prefix + group suffix to match
+        // StepsDispatcher::startDispatch(). Without the prefix
+        // component two dispatchers (different prefix, same group)
+        // would stomp each other's tick id.
+        $cacheSuffix = \StepDispatcher\Models\StepsDispatcher::cacheKeyPrefix().($this->step->group ?? 'global');
         $cacheKey = "current_tick_id:{$cacheSuffix}";
 
         if (cache()->has($cacheKey)) {

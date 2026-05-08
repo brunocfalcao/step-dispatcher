@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Support;
 
+use Closure;
 use Illuminate\Console\Command;
 use Symfony\Component\Console\Input\InputOption;
+use Throwable;
 
 /**
  * BaseCommand
@@ -17,6 +19,36 @@ use Symfony\Component\Console\Input\InputOption;
 abstract class BaseCommand extends Command
 {
     /**
+     * Subclasses use Laravel's `$signature` shorthand. Laravel's
+     * Command constructor parses that signature into the
+     * InputDefinition AFTER calling Symfony's configure() hook —
+     * so overriding configure() to add `--prefix=` would race the
+     * signature parse and either double-add (signature includes it)
+     * or silently fail (signature is parsed later, my add is wiped).
+     *
+     * Adding it in the constructor — after `parent::__construct()`
+     * has finished signature parsing — is the only place where the
+     * definition is fully populated. The `hasOption` guard skips
+     * the add when a subclass already declares `--prefix=` in its
+     * own signature (the installer command does, since `--prefix`
+     * is its primary argument).
+     */
+    public function __construct()
+    {
+        parent::__construct();
+
+        if (! $this->getDefinition()->hasOption('prefix')) {
+            $this->getDefinition()->addOption(new InputOption(
+                'prefix',
+                null,
+                InputOption::VALUE_OPTIONAL,
+                'Runtime table prefix (e.g. trading or trading_). Empty / absent = default tables. Pushed onto RuntimeContext for the duration of the command.',
+                ''
+            ));
+        }
+    }
+
+    /**
      * Get the console command options.
      *
      * @return array<int, InputOption>
@@ -25,7 +57,50 @@ abstract class BaseCommand extends Command
     {
         return array_merge(parent::getOptions(), [
             new InputOption('output', null, InputOption::VALUE_NONE, 'Display command output (silent by default)'),
+            new InputOption(
+                'prefix',
+                null,
+                InputOption::VALUE_OPTIONAL,
+                'Runtime table prefix (e.g. trading or trading_). Empty / absent = default tables (steps, steps_dispatcher, ...). Pushed onto RuntimeContext for the duration of the command.',
+                ''
+            ),
         ]);
+    }
+
+    /**
+     * Push the --prefix= value onto the RuntimeContext for the
+     * duration of the command. Returns a callable to invoke in
+     * `finally` so a throw inside `handle()` still pops the stack.
+     *
+     * Subclasses that override `execute()` should wrap their work
+     * with the returned callable.
+     */
+    protected function pushRuntimePrefix(): Closure
+    {
+        $context = app(RuntimeContext::class);
+        $rawPrefix = $this->hasOption('prefix') ? (string) $this->option('prefix') : '';
+        $normalised = Steps::normalise($rawPrefix);
+        $context->push($normalised);
+
+        return static function () use ($context): void {
+            $context->pop();
+        };
+    }
+
+    /**
+     * Symfony / Laravel calls execute() to dispatch handle(). Wrap
+     * it with the prefix push/pop so the entire command body sees
+     * the prefix without subclasses having to remember.
+     */
+    protected function execute(\Symfony\Component\Console\Input\InputInterface $input, \Symfony\Component\Console\Output\OutputInterface $output): int
+    {
+        $pop = $this->pushRuntimePrefix();
+
+        try {
+            return parent::execute($input, $output);
+        } finally {
+            $pop();
+        }
     }
 
     /**
@@ -35,7 +110,7 @@ abstract class BaseCommand extends Command
     {
         try {
             return $this->hasOption('output') && $this->option('output');
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             // If option doesn't exist or can't be accessed, default to silent
             return false;
         }

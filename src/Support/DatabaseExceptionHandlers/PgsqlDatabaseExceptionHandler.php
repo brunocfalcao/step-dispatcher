@@ -11,6 +11,8 @@ final class PgsqlDatabaseExceptionHandler extends BaseDatabaseExceptionHandler
 {
     use DatabaseExceptionHelpers;
 
+    public int $backoffSeconds = 2;
+
     protected array $retryableMessages = [
         'deadlock detected',
         'could not serialize access',
@@ -62,8 +64,6 @@ final class PgsqlDatabaseExceptionHandler extends BaseDatabaseExceptionHandler
     protected array $ignorableSqlStates = [];
 
     protected array $ignorableErrorCodes = [];
-
-    public int $backoffSeconds = 2;
 
     protected int $backoffMultiplier = 2;
 

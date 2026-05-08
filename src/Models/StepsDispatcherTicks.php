@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace StepDispatcher\Models;
 
 use StepDispatcher\Abstracts\BaseModel;
+use StepDispatcher\Support\RuntimeContext;
 
 /**
  * @property int $id
@@ -18,8 +19,6 @@ use StepDispatcher\Abstracts\BaseModel;
  */
 final class StepsDispatcherTicks extends BaseModel
 {
-    protected $table = 'steps_dispatcher_ticks';
-
     protected $guarded = [];
 
     protected $casts = [
@@ -27,6 +26,21 @@ final class StepsDispatcherTicks extends BaseModel
         'completed_at' => 'datetime',
         'duration' => 'integer',
     ];
+
+    public static function tableName(): string
+    {
+        return app(RuntimeContext::class)->current().'steps_dispatcher_ticks';
+    }
+
+    /**
+     * Resolve the live table name. Honours an explicit `setTable()`
+     * override on the instance before falling back to the active
+     * runtime prefix.
+     */
+    public function getTable(): string
+    {
+        return $this->table ?? self::tableName();
+    }
 
     public function steps()
     {

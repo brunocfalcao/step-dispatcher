@@ -9,11 +9,10 @@ use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Abstracts\BaseModel;
+use StepDispatcher\Support\RuntimeContext;
 
 final class StepsDispatcher extends BaseModel
 {
-    protected $table = 'steps_dispatcher';
-
     /**
      * Callable to determine whether a tick should be recorded.
      * Receives a StepsDispatcherTicks instance. Returns true to record, false to discard.
@@ -28,6 +27,30 @@ final class StepsDispatcher extends BaseModel
         'last_tick_completed' => 'datetime',
         'last_selected_at' => 'datetime',
     ];
+
+    /**
+     * Static accessor for raw-SQL / DB::table sites that can't go
+     * through Eloquent's getTable resolution.
+     */
+    public static function tableName(): string
+    {
+        return app(RuntimeContext::class)->current().'steps_dispatcher';
+    }
+
+    /**
+     * Cache key prefix scoped to the active runtime prefix so two
+     * dispatchers with different prefixes but the same group name
+     * don't collide on the same cache entries (current_tick_id,
+     * steps_dispatcher_tick_start, etc.).
+     */
+    public static function cacheKeyPrefix(): string
+    {
+        $prefix = app(RuntimeContext::class)->current();
+
+        // Empty prefix renders as bare keys for backwards compatibility
+        // with hosts that have always run a single (default) dispatcher.
+        return $prefix === '' ? '' : $prefix;
+    }
 
     /**
      * Register a callable that determines whether a tick should be persisted.
@@ -91,7 +114,7 @@ final class StepsDispatcher extends BaseModel
                 return 'alpha';
             }
 
-            DB::table('steps_dispatcher')
+            DB::table(self::tableName())
                 ->where('id', $dispatcher->id)
                 ->update(['last_selected_at' => DB::raw(
                     DB::getDriverName() === 'pgsql'
@@ -142,7 +165,7 @@ final class StepsDispatcher extends BaseModel
             // window where two concurrent callers could both flip
             // can_dispatch=true via a separate save() and then both slip
             // through a second CAS — causing duplicate dispatch to Redis.
-            $acquired = DB::table('steps_dispatcher')
+            $acquired = DB::table(self::tableName())
                 ->where('id', $dispatcher->id)
                 ->where(static function ($q) {
                     $q->where('can_dispatch', true)
@@ -160,7 +183,7 @@ final class StepsDispatcher extends BaseModel
                 return false;
             }
 
-            $cacheSuffix = $group ?? 'global';
+            $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
             Cache::put("steps_dispatcher_tick_start:{$cacheSuffix}", microtime(true), 300);
 
             $startedAt = now();
@@ -171,7 +194,7 @@ final class StepsDispatcher extends BaseModel
 
             Cache::put("current_tick_id:{$cacheSuffix}", $tick->id, 300);
 
-            DB::table('steps_dispatcher')
+            DB::table(self::tableName())
                 ->where('id', $dispatcher->id)
                 ->update([
                     'current_tick_id' => $tick->id,
@@ -203,7 +226,7 @@ final class StepsDispatcher extends BaseModel
             $tick = StepsDispatcherTicks::find($tickId);
 
             if ($tick) {
-                $cacheSuffix = $group ?? 'global';
+                $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
                 $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
                 $durationMs = $startedAtFloat
                     ? max(0, (int) round((microtime(true) - $startedAtFloat) * 1000))
@@ -232,7 +255,7 @@ final class StepsDispatcher extends BaseModel
             }
         }
 
-        DB::table('steps_dispatcher')
+        DB::table(self::tableName())
             ->where('id', $dispatcher->id)
             ->update([
                 'current_tick_id' => null,
@@ -241,7 +264,7 @@ final class StepsDispatcher extends BaseModel
                 'updated_at' => now(),
             ]);
 
-        $cacheSuffix = $group ?? 'global';
+        $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
         Cache::forget("current_tick_id:{$cacheSuffix}");
         Cache::forget("steps_dispatcher_tick_start:{$cacheSuffix}");
     }
@@ -249,5 +272,15 @@ final class StepsDispatcher extends BaseModel
     public static function label(?string $group): string
     {
         return $group === null ? 'NULL' : $group;
+    }
+
+    /**
+     * Resolve the live table name. Honours an explicit `setTable()`
+     * override on the instance before falling back to the active
+     * runtime prefix.
+     */
+    public function getTable(): string
+    {
+        return $this->table ?? self::tableName();
     }
 }

@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Transitions;
 
+use Spatie\ModelStates\Transition;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Cancelled;
-use Spatie\ModelStates\Transition;
 
 final class PendingToCancelled extends Transition
 {

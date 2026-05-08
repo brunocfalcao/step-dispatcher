@@ -76,7 +76,7 @@ it('logs an exception when transitionParentsToComplete fails to transition a par
     // with no trace of why, and the operator has nothing to grep for.
     Step::saving(function (Step $saving) use ($parent) {
         if ($saving->id === $parent->id && $saving->state instanceof Completed) {
-            throw new \RuntimeException('Simulated DB failure on parent completion');
+            throw new RuntimeException('Simulated DB failure on parent completion');
         }
     });
 

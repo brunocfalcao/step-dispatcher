@@ -368,7 +368,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
     {
         $staleThreshold = now()->subSeconds($thresholdSeconds);
 
-        $released = DB::table('steps_dispatcher')
+        $released = DB::table(\StepDispatcher\Models\StepsDispatcher::tableName())
             ->where('can_dispatch', false)
             ->where('updated_at', '<', $staleThreshold)
             ->update([

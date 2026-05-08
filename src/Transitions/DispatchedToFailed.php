@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Transitions;
 
+use Spatie\ModelStates\Transition;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
-use Spatie\ModelStates\Transition;
 
 final class DispatchedToFailed extends Transition
 {
