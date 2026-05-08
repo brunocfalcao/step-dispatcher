@@ -6,6 +6,7 @@ namespace StepDispatcher\Support;
 
 use Exception;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
@@ -243,10 +244,42 @@ final class StepDispatcher
 
             $progress = 8;
 
+            // Per-tick saturation counters. Cheap Redis INCRs keyed by
+            // (group, minute-bucket). A host-app cron flushes them to
+            // a persistent table once per minute. The dashboard reads
+            // the persistent table — the dispatcher tick pays only the
+            // four sub-millisecond increments and never touches MySQL
+            // for telemetry.
+            //
+            // Bucket keying uses UTC minute precision so flushers
+            // always read the *previous* completed minute and never
+            // race with in-flight ticks of the current minute.
+            $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
+            $dispatchableCount = $dispatchableSteps->count();
+            $wasCapped = $maxPerTick > 0 && $dispatchableCount >= $maxPerTick;
+            $pendingAfterTick = $wasCapped
+                ? Step::pending()
+                    ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
+                    ->where(static function ($q) {
+                        $q->whereNull('dispatch_after')
+                            ->orWhere('dispatch_after', '<=', now());
+                    })
+                    ->count()
+                : 0;
+            $hasLeftover = $pendingAfterTick > 0;
+
+            self::recordTickMetrics(
+                group: $group,
+                dispatchableCount: $dispatchableCount,
+                wasCapped: $wasCapped,
+                hasLeftover: $hasLeftover,
+                pendingAfterTick: $pendingAfterTick,
+            );
+
             Step::logGlobal('dispatcher', sprintf(
                 'Tick dispatched | group=%s | dispatchable=%d | pending_seen=%d | blocks_seen=%d',
                 $group ?? 'NULL',
-                $dispatchableSteps->count(),
+                $dispatchableCount,
                 $pendingSteps->count(),
                 $pendingSteps->pluck('block_uuid')->unique()->count(),
             ));
@@ -748,6 +781,62 @@ final class StepDispatcher
             } catch (Exception $e) {
                 // Log but continue - don't fail entire batch due to one invalid transition
             }
+        }
+    }
+
+    /**
+     * Record the per-tick saturation counters into Redis. Keyed by
+     * (group, minute-bucket) so a host-app flush cron can roll them
+     * up into a persistent table without contention with the live
+     * dispatcher. Uses Cache::increment for the hot-path writes;
+     * defaults to no-op silently if the cache store does not support
+     * atomic increment (e.g. an array store under unit tests).
+     *
+     * Five counters per (group, bucket):
+     *  - ticks_observed              total ticks in this bucket
+     *  - ticks_capped                ticks where dispatchable_count == max_per_tick
+     *  - ticks_capped_with_leftover  capped ticks AND Pending still > 0 after promotion
+     *  - total_dispatched            sum of dispatchable_count across the bucket
+     *  - max_pending_after           tracked via Cache::put + max-on-replace
+     */
+    public static function recordTickMetrics(
+        ?string $group,
+        int $dispatchableCount,
+        bool $wasCapped,
+        bool $hasLeftover,
+        int $pendingAfterTick,
+    ): void {
+        $bucket = now()->utc()->format('Y-m-d-H-i');
+        $groupKey = $group ?? 'global';
+        $prefix = "dispatcher:saturation:{$groupKey}:{$bucket}";
+
+        try {
+            Cache::increment("{$prefix}:ticks_observed");
+
+            if ($wasCapped) {
+                Cache::increment("{$prefix}:ticks_capped");
+
+                if ($hasLeftover) {
+                    Cache::increment("{$prefix}:ticks_capped_with_leftover");
+                }
+            }
+
+            if ($dispatchableCount > 0) {
+                Cache::increment("{$prefix}:total_dispatched", $dispatchableCount);
+            }
+
+            // Track running max for pending-after via read-then-conditionally-write.
+            // Not atomic; in a tight race two ticks may both write the same value.
+            // Acceptable for a max gauge.
+            $maxKey = "{$prefix}:max_pending_after";
+            $existingMax = (int) (Cache::get($maxKey) ?? 0);
+            if ($pendingAfterTick > $existingMax) {
+                // 90s TTL: bucket is 1 minute long, plus 30s grace for the flush
+                // cron to consume the bucket before it expires.
+                Cache::put($maxKey, $pendingAfterTick, 90);
+            }
+        } catch (\Throwable) {
+            // Telemetry must never break dispatch. Swallow.
         }
     }
 

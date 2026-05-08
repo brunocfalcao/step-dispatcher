@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.11.14 - 2026-05-08
+
+### Improvements
+
+- [NEW FEATURE] **Per-tick saturation counters via `StepDispatcher::recordTickMetrics()`.** Every tick increments four Redis counters keyed by `(group, UTC minute bucket)`: `ticks_observed`, `ticks_capped` (dispatchable_count == max_per_tick), `ticks_capped_with_leftover` (capped AND Pending after promotion > 0), `total_dispatched`. Plus a `max_pending_after` running max. The counters are wrapped in a try/catch — telemetry must never break dispatch. A host-app cron is expected to flush the previous minute's keys into a persistent table for dashboard surface; the dispatcher hot path stays Redis-only and pays only sub-millisecond INCRs per tick. Saturation % per bucket = `ticks_capped_with_leftover / ticks_observed`. Sustained 100% across all groups = unambiguous signal that more dispatcher capacity (more groups) would help; sub-100% means the cap is not the bottleneck.
+
 ## 1.11.13 - 2026-05-07
 
 ### Fixes
