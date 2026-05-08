@@ -54,13 +54,39 @@ All apps sharing the same database must point to the **same** directory.
 
 ## Schedule the commands
 
+The dispatcher supports two wiring shapes. Pick one — don't run both, the per-group entries replace the global one.
+
+### Recommended: per-group parallel dispatchers
+
+One scheduler entry per group, all forked into their own subprocess via `runInBackground()`. Each group ticks every second on its own — total per-group cadence is independent of how many groups exist. This is what the Kraite project ships.
+
 ```php
 // routes/console.php (Laravel 11+) or app/Console/Kernel.php
 
-Schedule::command('steps:dispatch')->everySecond();
-Schedule::command('steps:recover-stale --recover-dispatched --release-locks')->everyMinute();
+$groups = ['alpha', 'beta', 'gamma', 'delta', 'epsilon',
+           'zeta', 'eta', 'theta', 'iota', 'kappa'];
+
+foreach ($groups as $group) {
+    Schedule::command("steps:dispatch --group={$group}")
+        ->everySecond()
+        ->runInBackground();   // CRITICAL — without this the scheduler runs
+                               // the 10 commands in-process serially and
+                               // tick age regresses to ~5–10s. With it,
+                               // every group ticks ~1s.
+}
+
+Schedule::command('steps:recover-stale --recover-dispatched --release-locks --watchdog-progress')
+    ->everyMinute();
 Schedule::command('steps:archive --duration=5')->hourly();
 Schedule::command('steps:purge --days=30')->dailyAt('02:00');
+```
+
+### Legacy / single-group setups
+
+A single `steps:dispatch` (no `--group`) entry loops all groups serially in one PHP process. Per-group cadence ≈ `total groups × per-tick duration`. Fine for small workloads but doesn't parallelise.
+
+```php
+Schedule::command('steps:dispatch')->everySecond();
 ```
 
 ## Quick start
@@ -258,6 +284,26 @@ return [
     ],
 ];
 ```
+
+## Saturation telemetry
+
+Every dispatcher tick increments four Redis counters keyed by `(group, UTC minute bucket)`:
+
+- `ticks_observed` — total ticks in this bucket
+- `ticks_capped` — ticks where `dispatchable_count == max_per_tick`
+- `ticks_capped_with_leftover` — capped ticks AND Pending still > 0 after promotion
+- `total_dispatched` — sum of dispatchable rows promoted
+
+Plus a `max_pending_after` running gauge.
+
+The writes are wrapped in try/catch — telemetry must never break dispatch. Counters expire 90s after their bucket closes, so even if no host-app cron consumes them, they self-clean.
+
+**Saturation %** per bucket = `ticks_capped_with_leftover / ticks_observed × 100`.
+
+- `100%` sustained across all groups → adding more groups will help. The dispatcher's per-tick cap is the actual bottleneck.
+- `<100%` → cap is not the bottleneck. Look downstream (workers, API rate limits, observer chain).
+
+A host-app cron is expected to flush the previous completed minute's keys into a persistent table for dashboard surface. The Kraite project ships a `kraite:cron-flush-dispatcher-saturation` command + `steps_dispatcher_saturation` migration as a reference implementation.
 
 ## Diagnostic logging
 
