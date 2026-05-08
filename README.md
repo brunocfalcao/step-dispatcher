@@ -257,6 +257,81 @@ Ten groups (`alpha`, `beta`, …, `kappa`) ship seeded. Each has its own dispatc
 
 Steps inherit their group from the parent or sibling in their block; root steps get round-robin assigned (`SKIP LOCKED` + microsecond-precision `last_selected_at` — no contention).
 
+## Table-prefix isolation (multi-dispatcher mode)
+
+The dispatcher can run as N completely isolated ecosystems against the same database. Each ecosystem owns its own four-table set: `{prefix}steps`, `{prefix}steps_dispatcher`, `{prefix}steps_dispatcher_ticks`, `{prefix}steps_archive`. The prefix is a runtime concern — the same dispatcher code runs against any prefix; `RuntimeContext` (a scoped singleton) holds the active prefix on a stack, and every Step / dispatcher query resolves its table via `tableName()` helpers that read that stack.
+
+Three ways to set the active prefix (resolution order: explicit > closure > ambient > default):
+
+```php
+// 1. Ambient via CLI — the package injects --prefix= onto every command
+php artisan steps:dispatch --prefix=trading --group=alpha
+php artisan steps:archive --prefix=trading --duration=1
+php artisan steps:purge   --prefix=trading --only-archive --days=5
+
+// 2. Closure-scoped (host code) — push/pop balanced even on throw
+use StepDispatcher\Support\Steps;
+
+Steps::usingPrefix('trading', function () use ($position) {
+    Step::create([
+        'class' => MyJob::class,
+        'arguments' => ['positionId' => $position->id],
+    ]);
+});
+
+// 3. Single-call explicit — bind one builder to a specific prefix
+Step::prefix('calc')->create([...]);
+```
+
+The default (empty) prefix `''` resolves to the original `steps_*` tables, so existing host apps keep working with zero changes.
+
+### Install a new prefix
+
+```bash
+php artisan steps:install --prefix=trading
+```
+
+Creates the four prefixed tables programmatically with prefix-interpolated index names so they never collide with the default set or another prefix. Per-table idempotent: existing tables are skipped, missing ones created (re-run heals partial drops). The dispatcher group seed (alpha..kappa) only fires when the dispatcher table is genuinely created — re-runs cannot duplicate seeded rows.
+
+Empty prefix is rejected — that's what the package's stock migrations install.
+
+### What gets isolated
+
+- **Tables** — all four sets are physically separate
+- **Dispatcher cap** — each prefix has its own `steps_dispatcher` group rows, so the per-tick `max_per_tick` budget applies independently
+- **Per-tick saturation cache keys** — `dispatcher:saturation:*` keys are prefix-scoped (no cross-prefix stomping)
+- **Active flag file** — `{flag_dir}/{prefix}active.flag` (a prefixed dispatcher going idle does NOT deactivate other prefixes)
+- **Tick-id cache keys** — `current_tick_id:{prefix}{group}` (two prefixes sharing a group name don't collide)
+- **Recursive child-block CTE** — `Step::tableName()` interpolated into raw SQL so the recursive walk hits the right table set
+
+### Worker-side propagation
+
+`BaseStepJob` carries a `public string $stepPrefix` that's stamped on the queue payload at dispatch time. When the worker boots:
+
+1. `__unserialize()` pushes the prefix onto `RuntimeContext` BEFORE Laravel's `SerializesModels` trait restores the `$step` model. This is mandatory — Laravel's restore runs `Step::find($id)` deserialize-time, which would query the wrong table without the gate.
+2. `handle()` re-pushes the prefix for the execution body, balanced by a `pop()` in finally.
+3. Any `Step::create()` issued inside `compute()` inherits the ambient prefix — child blocks land in the same prefixed set as their parent, all the way down a multi-hop workflow chain.
+4. `failed()` (called by Laravel directly on terminal failure, bypassing `handle()`) has its own push/pop pair so the Failed transition writes to the correct prefixed table.
+
+### Cron entries for a prefixed dispatcher
+
+Just append `--prefix=<name>` to every dispatcher / archive / purge / recover-stale entry:
+
+```php
+foreach (['alpha', 'beta', /* ... */] as $group) {
+    Schedule::command("steps:dispatch --prefix=trading --group={$group}")
+        ->everySecond()
+        ->runInBackground();
+}
+
+Schedule::command('steps:recover-stale --prefix=trading --recover-dispatched --release-locks --watchdog-progress')
+    ->everyMinute()
+    ->withoutOverlapping();
+
+Schedule::command('steps:archive --prefix=trading --duration=1')->dailyAt('04:05');
+Schedule::command('steps:purge   --prefix=trading --only-archive --days=5')->dailyAt('04:35');
+```
+
 ## Configuration
 
 `config/step-dispatcher.php`:

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Pending;
@@ -154,18 +155,53 @@ it('tableName() helpers resolve to the prefixed names under ambient prefix', fun
     );
 });
 
-it('install command refuses to clobber an already-installed prefix', function () {
+it('install command is idempotent on a fully installed prefix (no-op, no duplicate seeds)', function () {
     // beforeEach already installed `trading`. A second install with
-    // the same prefix must abort cleanly rather than silently
-    // corrupting whatever rows are already in those tables.
+    // the same prefix must succeed as a no-op: every target table
+    // already exists, nothing is recreated, and crucially the
+    // dispatcher group seed does NOT fire again (otherwise the
+    // alpha..kappa rows would duplicate every time the operator
+    // re-runs the command for a sanity check).
+    $seedCountBefore = DB::table('trading_steps_dispatcher')->count();
+
     $exitCode = $this->artisan('steps:install', ['--prefix' => 'trading'])->run();
 
-    expect($exitCode)->toBe(1,
-        'Re-installing an existing prefix MUST fail. A partial '
-        .'install (some tables created, others not because they '
-        .'already exist) would leave the dispatcher in an undefined '
-        .'state — every test that touches it from then on becomes '
-        .'a flaky liability.'
+    expect($exitCode)->toBe(0,
+        'Re-running install on a complete set must succeed as a no-op. '
+        .'The previous "atomic refuse" semantics blocked operators '
+        .'from re-running the command after a partial manual drop — '
+        .'forcing them to drop everything and reinstall just to heal '
+        .'one missing table.'
+    );
+
+    expect(DB::table('trading_steps_dispatcher')->count())->toBe($seedCountBefore,
+        'The dispatcher seed must NOT fire on a skip path. A re-seed '
+        .'would duplicate alpha..kappa rows on every re-run, breaking '
+        .'the unique-on-group constraint and silently corrupting the '
+        .'round-robin selection.'
+    );
+});
+
+it('install command heals a partial drop by creating only the missing tables', function () {
+    // Simulate an operator who manually dropped one of the prefixed
+    // tables (e.g. `trading_steps_archive` for a clean reset of
+    // archived rows). Re-running install must NOT touch the three
+    // surviving tables and must create only the missing one.
+    Schema::drop('trading_steps_archive');
+
+    $stepsRowCountBefore = DB::table('trading_steps_dispatcher')->count();
+
+    $exitCode = $this->artisan('steps:install', ['--prefix' => 'trading'])->run();
+
+    expect($exitCode)->toBe(0);
+    expect(Schema::hasTable('trading_steps_archive'))->toBeTrue(
+        'The missing archive table must be re-created on the heal pass.'
+    );
+    expect(DB::table('trading_steps_dispatcher')->count())->toBe($stepsRowCountBefore,
+        'Surviving dispatcher table must NOT be re-seeded. The seed '
+        .'fires only on the path that genuinely creates the dispatcher '
+        .'table; a heal-pass that only creates archive must leave '
+        .'dispatcher untouched.'
     );
 });
 

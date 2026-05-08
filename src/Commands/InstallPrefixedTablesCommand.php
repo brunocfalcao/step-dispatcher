@@ -13,15 +13,17 @@ use StepDispatcher\Support\Steps;
 /**
  * `steps:install --prefix=trading`
  *
- * Creates a fresh prefixed table set programmatically: `{prefix}steps`,
+ * Creates a prefixed table set programmatically: `{prefix}steps`,
  * `{prefix}steps_dispatcher`, `{prefix}steps_dispatcher_ticks`,
  * `{prefix}steps_archive`. Index names are prefix-interpolated so they
  * never collide with the default set or another prefixed install.
  *
- * Idempotency: aborts atomically if ANY of the four target tables
- * already exists. The operator gets a clear error rather than a
- * partial install, which would leave the DB inconsistent. To
- * reinstall, drop the prefixed tables first.
+ * Idempotent per-table: each target is checked individually with
+ * `Schema::hasTable()`. Existing tables are skipped, missing tables
+ * are created. Re-running on a complete install is a no-op; running
+ * after a partial drop heals the gap. The dispatcher seed (10 group
+ * rows) only fires on a fresh dispatcher table — never on a skip
+ * path — so re-runs cannot duplicate the seeded rows.
  *
  * Default prefix `''` is rejected — that's what the original
  * migrations install. Run `php artisan migrate` for the default set.
@@ -30,7 +32,7 @@ final class InstallPrefixedTablesCommand extends BaseCommand
 {
     protected $signature = 'steps:install {--prefix= : Prefix to install, e.g. trading or trading_. Required, non-empty.} {--output : Display command output (silent by default)}';
 
-    protected $description = 'Install a fresh prefixed step-dispatcher table set programmatically.';
+    protected $description = 'Install a prefixed step-dispatcher table set programmatically. Idempotent: existing tables are skipped, missing ones created.';
 
     public function handle(): int
     {
@@ -44,32 +46,52 @@ final class InstallPrefixedTablesCommand extends BaseCommand
 
         $prefix = Steps::normalise($rawPrefix);
 
-        $tables = [
-            $prefix.'steps',
-            $prefix.'steps_dispatcher',
-            $prefix.'steps_dispatcher_ticks',
-            $prefix.'steps_archive',
-        ];
-
-        // Atomicity: refuse the install if any target table already
-        // exists. A partial install (some tables created, others
-        // not) would leave the dispatcher in an undefined state.
-        $existing = array_filter($tables, static fn (string $t) => Schema::hasTable($t));
-        if (! empty($existing)) {
-            $this->verboseError('Refusing to install — these tables already exist: '.implode(', ', $existing).'. Drop them first or pick a different prefix.');
-
-            return self::FAILURE;
-        }
-
         $this->verboseInfo("Installing prefixed table set with prefix=`{$prefix}`...");
 
-        $this->createStepsTable($prefix);
-        $this->createDispatcherTable($prefix);
-        $this->seedDispatcherGroups($prefix);
-        $this->createTicksTable($prefix);
-        $this->createArchiveTable($prefix);
+        $created = [];
+        $skipped = [];
 
-        $this->verboseInfo("Done. Prefix `{$prefix}` is ready to receive `steps:dispatch --prefix={$rawPrefix}`.");
+        // Each step table maps to its create method. The dispatcher
+        // entry is special-cased afterwards: when we genuinely create
+        // it we also seed the per-group rows. Skipping the dispatcher
+        // also skips the seed — re-runs cannot duplicate seeded rows.
+        $plan = [
+            'steps' => fn () => $this->createStepsTable($prefix),
+            'steps_dispatcher' => fn () => $this->createDispatcherTable($prefix),
+            'steps_dispatcher_ticks' => fn () => $this->createTicksTable($prefix),
+            'steps_archive' => fn () => $this->createArchiveTable($prefix),
+        ];
+
+        foreach ($plan as $suffix => $creator) {
+            $table = $prefix.$suffix;
+
+            if (Schema::hasTable($table)) {
+                $skipped[] = $table;
+
+                continue;
+            }
+
+            $creator();
+            $created[] = $table;
+
+            if ($suffix === 'steps_dispatcher') {
+                $this->seedDispatcherGroups($prefix);
+            }
+        }
+
+        if (! empty($created)) {
+            $this->verboseInfo('Created: '.implode(', ', $created));
+        }
+
+        if (! empty($skipped)) {
+            $this->verboseInfo('Skipped (already exist): '.implode(', ', $skipped));
+        }
+
+        if (empty($created)) {
+            $this->verboseInfo("No-op. Prefix `{$prefix}` is already fully installed.");
+        } else {
+            $this->verboseInfo("Done. Prefix `{$prefix}` is ready to receive `steps:dispatch --prefix={$rawPrefix}`.");
+        }
 
         return self::SUCCESS;
     }

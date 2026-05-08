@@ -76,15 +76,81 @@ abstract class BaseStepJob implements ShouldQueue
     // Must be implemented by subclasses to define the compute logic.
     abstract protected function compute();
 
+    /**
+     * Restore prefix BEFORE the SerializesModels trait re-fetches
+     * the Step model from the queue payload. Laravel's CallQueuedHandler
+     * calls `__unserialize()` immediately after pulling the job off
+     * the queue — that pass calls `getRestoredPropertyValue()` per
+     * model property, which issues a `Model::find()` against the
+     * Step table. Without the prefix on the RuntimeContext stack at
+     * that moment, the find queries the default `steps` table for a
+     * row that lives in `trading_steps` (or whichever prefix), and
+     * `findOrFail()` throws ModelNotFoundException — every prefixed
+     * job lands in the failed_jobs bucket.
+     *
+     * The prefix is read from the raw payload values (where it is a
+     * plain string, not yet assigned to `$this->stepPrefix`) so the
+     * push happens BEFORE the trait's restoration loop runs. After
+     * the trait restores all properties we pop — the matching push
+     * for the actual handle() execution is added by handle() itself.
+     */
+    public function __unserialize(array $values): void
+    {
+        $prefix = '';
+
+        if (array_key_exists('stepPrefix', $values) && is_string($values['stepPrefix'])) {
+            $prefix = $values['stepPrefix'];
+        }
+
+        $context = app(RuntimeContext::class);
+        $context->push($prefix);
+
+        try {
+            // Delegate to the trait's restoration logic. Calling
+            // it via `parent::__unserialize` is not an option (it's
+            // a trait method), so we replicate the trait's loop
+            // here verbatim — this is the intentional "decorator"
+            // pattern for trait methods that need preconditions.
+            $properties = (new \ReflectionClass($this))->getProperties();
+            $class = static::class;
+
+            foreach ($properties as $property) {
+                if ($property->isStatic()) {
+                    continue;
+                }
+
+                $name = $property->getName();
+
+                if ($property->isPrivate()) {
+                    $name = "\0{$class}\0{$name}";
+                } elseif ($property->isProtected()) {
+                    $name = "\0*\0{$name}";
+                }
+
+                if (! array_key_exists($name, $values)) {
+                    continue;
+                }
+
+                $property->setValue(
+                    $this,
+                    $this->getRestoredPropertyValue($values[$name])
+                );
+            }
+        } finally {
+            $context->pop();
+        }
+    }
+
     final public function handle(): void
     {
         // Restore the ambient prefix the dispatcher tick stamped onto
         // this job. Must happen BEFORE prepareJobExecution() — the
         // very first call there is `$this->step->refresh()` which
         // resolves the Step model's table from the active prefix.
-        // Without this push, a fresh worker process starts with an
-        // empty stack and refresh() would query the unprefixed
-        // table, returning a wrong-table row or null.
+        // The earlier push in __unserialize() already popped after
+        // model restoration; this push covers the entire handle()
+        // execution body and is balanced by the matching pop in the
+        // finally block below.
         $context = app(RuntimeContext::class);
         $context->push($this->stepPrefix);
 
