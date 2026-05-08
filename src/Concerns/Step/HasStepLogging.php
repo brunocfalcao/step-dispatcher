@@ -157,7 +157,7 @@ trait HasStepLogging
      */
     protected static function formatLine(string $message): string
     {
-        return now()->format('H:i:s.u').' | '.rtrim($message, "\r\n").PHP_EOL;
+        return now()->format('H:i:s.u').' | '.mb_rtrim($message, "\r\n").PHP_EOL;
     }
 
     /**

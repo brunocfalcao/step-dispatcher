@@ -7,6 +7,8 @@ namespace StepDispatcher\Commands;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use StepDispatcher\Models\Step;
+use StepDispatcher\Models\StepsArchive;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Failed;
@@ -96,12 +98,13 @@ final class ArchiveStepsCommand extends BaseCommand
     private function findAllArchivableRoots(Carbon $cutoff): Collection
     {
         $placeholders = $this->placeholders($this->archivableStates);
+        $stepsTable = Step::tableName();
 
-        return DB::table('steps as s')
+        return DB::table($stepsTable.' as s')
             ->select('s.block_uuid')
-            ->whereNotExists(function ($q) {
+            ->whereNotExists(function ($q) use ($stepsTable) {
                 $q->select(DB::raw(1))
-                    ->from('steps as parent')
+                    ->from($stepsTable.' as parent')
                     ->whereColumn('parent.child_block_uuid', 's.block_uuid');
             })
             ->groupBy('s.block_uuid')
@@ -123,7 +126,7 @@ final class ArchiveStepsCommand extends BaseCommand
         $queue = [$rootUuid];
 
         while (! empty($queue)) {
-            $childUuids = DB::table('steps')
+            $childUuids = DB::table(Step::tableName())
                 ->whereIn('block_uuid', $queue)
                 ->whereNotNull('child_block_uuid')
                 ->pluck('child_block_uuid')
@@ -149,7 +152,7 @@ final class ArchiveStepsCommand extends BaseCommand
      */
     private function treeIsFullyTerminal(array $treeUuids): bool
     {
-        return DB::table('steps')
+        return DB::table(Step::tableName())
             ->whereIn('block_uuid', $treeUuids)
             ->whereNotIn('state', $this->archivableStates)
             ->doesntExist();
@@ -178,18 +181,25 @@ final class ArchiveStepsCommand extends BaseCommand
         $chunks = array_chunk($treeUuids, 100);
         $totalMoved = 0;
 
+        // Resolve both source and destination through the model
+        // helpers so INSERT-from-SELECT honours the active runtime
+        // prefix end-to-end. Hardcoding either name would silently
+        // copy the wrong table set under a prefixed dispatcher.
+        $stepsTable = Step::tableName();
+        $archiveTable = StepsArchive::tableName();
+
         foreach ($chunks as $uuidChunk) {
             $placeholders = implode(',', array_fill(0, count($uuidChunk), '?'));
 
-            DB::transaction(function () use ($columnList, $placeholders, $uuidChunk, &$totalMoved) {
+            DB::transaction(function () use ($columnList, $placeholders, $uuidChunk, $stepsTable, $archiveTable, &$totalMoved) {
                 DB::statement(
-                    "INSERT INTO steps_archive ({$columnList})
-                     SELECT {$columnList} FROM steps
+                    "INSERT INTO {$archiveTable} ({$columnList})
+                     SELECT {$columnList} FROM {$stepsTable}
                      WHERE block_uuid IN ({$placeholders})",
                     $uuidChunk
                 );
 
-                $deleted = DB::table('steps')
+                $deleted = DB::table($stepsTable)
                     ->whereIn('block_uuid', $uuidChunk)
                     ->delete();
 

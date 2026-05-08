@@ -7,11 +7,11 @@ namespace StepDispatcher\Support;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
 use InvalidArgumentException;
-use StepDispatcher\Models\Step;
-use StepDispatcher\States\Failed;
 use ReflectionClass;
 use ReflectionException;
 use RuntimeException;
+use StepDispatcher\Models\Step;
+use StepDispatcher\States\Failed;
 use Throwable;
 
 trait DispatchesJobs
@@ -28,6 +28,13 @@ trait DispatchesJobs
         try {
             $job = self::instantiateJobWithArguments($step->class, $step->arguments);
             $job->step = $step;
+
+            // Stamp the ambient prefix onto the job payload so the
+            // worker (which boots in a fresh process / scoped
+            // container with an empty prefix stack) can restore the
+            // right ambient before any DB read against the Step
+            // model. Default `''` keeps unprefixed behaviour.
+            $job->stepPrefix = app(RuntimeContext::class)->current();
 
             if ($step->queue === 'sync') {
                 $job->handle();

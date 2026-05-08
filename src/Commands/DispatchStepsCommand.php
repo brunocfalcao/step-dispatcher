@@ -59,9 +59,12 @@ final class DispatchStepsCommand extends BaseCommand
                 return self::SUCCESS;
             }
 
-            // No --group provided: dispatch for ALL groups present in steps_dispatcher
-            // (including a NULL/global row if it exists).
-            $groups = DB::table('steps_dispatcher')
+            // No --group provided: dispatch for ALL groups present in the
+            // active prefix's steps_dispatcher table (including a
+            // NULL/global row if it exists). Resolve via the model so
+            // a prefixed dispatcher discovers groups from its OWN
+            // dispatcher table, not the default unprefixed one.
+            $groups = DB::table(\StepDispatcher\Models\StepsDispatcher::tableName())
                 ->select('group')
                 ->distinct()
                 ->pluck('group')

@@ -19,6 +19,7 @@ use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
+use StepDispatcher\Support\RuntimeContext;
 
 /**
  * @property int $id
@@ -72,6 +73,36 @@ final class Step extends BaseModel
         'state' => StepStatus::class,
     ];
 
+    /**
+     * Static accessor used by raw-SQL sites (recursive CTEs,
+     * INSERT INTO statements, DB::table calls) that can't go
+     * through Eloquent. Returns the table name with the active
+     * runtime prefix applied.
+     */
+    public static function tableName(): string
+    {
+        return app(RuntimeContext::class)->current().'steps';
+    }
+
+    /**
+     * Single-call explicit prefix override. Returns a fresh query
+     * builder bound to the prefixed table, so a one-off cross-prefix
+     * write does not require pushing onto the runtime stack:
+     *
+     *     Step::prefix('calc')->create([...]);
+     *
+     * The base table name is computed from the explicit prefix
+     * (normalised to its trailing-underscore form), independent of
+     * whatever ambient prefix the surrounding code was running under.
+     */
+    public static function prefix(string $prefix): Builder
+    {
+        $instance = new self;
+        $instance->setTable(\StepDispatcher\Support\Steps::normalise($prefix).'steps');
+
+        return $instance->newQuery();
+    }
+
     public static function concludedStepStates()
     {
         return [Completed::class, Skipped::class];
@@ -102,6 +133,20 @@ final class Step extends BaseModel
         return StepsDispatcher::getDispatchGroup();
     }
 
+    /**
+     * Resolve the live table name. Honours an explicit `setTable()`
+     * override on the instance (e.g. set by `Step::prefix('calc')`)
+     * before falling back to the active runtime prefix. Without
+     * the explicit-first check, `Step::prefix('calc')->create()`
+     * would still write to the ambient prefix's table because
+     * `newInstance()` propagates the bound table only if `getTable`
+     * actually reads it.
+     */
+    public function getTable(): string
+    {
+        return $this->table ?? self::tableName();
+    }
+
     public function stepTick()
     {
         return $this->belongsTo(StepsDispatcherTicks::class, 'tick_id');
@@ -120,7 +165,10 @@ final class Step extends BaseModel
 
     public function scopePending(Builder $query)
     {
-        return $query->where('steps.state', Pending::class);
+        // Qualify the column with the resolved table name so the
+        // scope works in JOIN contexts under any active prefix.
+        // Hardcoding `steps.state` would break for `trading_steps`.
+        return $query->where($query->getModel()->getTable().'.state', Pending::class);
     }
 
     public function hasChildren(): bool

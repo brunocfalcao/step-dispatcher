@@ -20,6 +20,7 @@ use StepDispatcher\Models\Step;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\ExceptionParser;
+use StepDispatcher\Support\RuntimeContext;
 use Throwable;
 
 /*
@@ -41,6 +42,17 @@ abstract class BaseStepJob implements ShouldQueue
     use HandlesStepLifecycle;
 
     public Step $step;
+
+    /**
+     * Runtime prefix this step belongs to. Stamped onto the job
+     * payload when DispatchesJobs::dispatchSingleStep() pushes the
+     * job to the queue, so the worker (which boots in a fresh
+     * process / scoped container with an empty prefix stack) can
+     * restore the right ambient prefix BEFORE any DB read against
+     * the Step model. Empty string `''` keeps the default unprefixed
+     * behaviour for hosts that aren't using the prefix feature.
+     */
+    public string $stepPrefix = '';
 
     public int $jobBackoffSeconds = 10;
 
@@ -66,6 +78,16 @@ abstract class BaseStepJob implements ShouldQueue
 
     final public function handle(): void
     {
+        // Restore the ambient prefix the dispatcher tick stamped onto
+        // this job. Must happen BEFORE prepareJobExecution() — the
+        // very first call there is `$this->step->refresh()` which
+        // resolves the Step model's table from the active prefix.
+        // Without this push, a fresh worker process starts with an
+        // empty stack and refresh() would query the unprefixed
+        // table, returning a wrong-table row or null.
+        $context = app(RuntimeContext::class);
+        $context->push($this->stepPrefix);
+
         try {
             if (! $this->prepareJobExecution()) {
                 return;
@@ -73,6 +95,7 @@ abstract class BaseStepJob implements ShouldQueue
 
             if ($this->isInConfirmationMode()) {
                 $this->handleConfirmationMode();
+
                 return;
             }
 
@@ -89,6 +112,8 @@ abstract class BaseStepJob implements ShouldQueue
             $this->finalizeJobExecution();
         } catch (Throwable $e) {
             $this->handleException($e);
+        } finally {
+            $context->pop();
         }
     }
 
@@ -108,24 +133,35 @@ abstract class BaseStepJob implements ShouldQueue
             return;
         }
 
-        $stepId = $this->step->id;
+        // Laravel calls failed() directly (bypassing handle()), so
+        // the prefix push from handle() is not active here. Restore
+        // the ambient prefix the same way handle() does, with the
+        // matching pop in finally so a throw inside still cleans up.
+        $context = app(RuntimeContext::class);
+        $context->push($this->stepPrefix);
 
-        // Parse exception for friendly message and stack trace
-        $parser = ExceptionParser::with($e);
+        try {
+            $stepId = $this->step->id;
 
-        // Update error_message, error_stack_trace, and response
-        $this->step->update([
-            'error_message' => $parser->friendlyMessage(),
-            'error_stack_trace' => $parser->stackTrace(),
-            'response' => ['exception' => $e->getMessage()],
-        ]);
+            // Parse exception for friendly message and stack trace
+            $parser = ExceptionParser::with($e);
 
-        // Finalize duration
-        $this->finalizeDuration();
+            // Update error_message, error_stack_trace, and response
+            $this->step->update([
+                'error_message' => $parser->friendlyMessage(),
+                'error_stack_trace' => $parser->stackTrace(),
+                'response' => ['exception' => $e->getMessage()],
+            ]);
 
-        // Transition to Failed state (only if not already in a terminal state)
-        if (! $this->step->state instanceof Failed) {
-            $this->step->state->transitionTo(Failed::class);
+            // Finalize duration
+            $this->finalizeDuration();
+
+            // Transition to Failed state (only if not already in a terminal state)
+            if (! $this->step->state instanceof Failed) {
+                $this->step->state->transitionTo(Failed::class);
+            }
+        } finally {
+            $context->pop();
         }
     }
 

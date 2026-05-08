@@ -22,6 +22,7 @@ use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Transitions\PendingToDispatched;
+use Throwable;
 
 final class StepDispatcher
 {
@@ -50,7 +51,7 @@ final class StepDispatcher
             @mkdir($dir, 0o755, true);
         }
 
-        $flag = $dir.'/active.flag';
+        $flag = self::flagFilePath();
 
         if (! file_exists($flag)) {
             @file_put_contents($flag, (string) time());
@@ -63,7 +64,7 @@ final class StepDispatcher
      */
     public static function deactivate(): void
     {
-        $flag = self::flagDir().'/active.flag';
+        $flag = self::flagFilePath();
 
         if (file_exists($flag)) {
             @unlink($flag);
@@ -75,7 +76,7 @@ final class StepDispatcher
      */
     public static function isActive(): bool
     {
-        return file_exists(self::flagDir().'/active.flag');
+        return file_exists(self::flagFilePath());
     }
 
     /**
@@ -724,11 +725,16 @@ final class StepDispatcher
         $placeholders = implode(separator: ',', array: array_fill(0, $rootBlocks->count(), '?'));
 
         $groupCol = DB::getQueryGrammar()->wrap('group');
+        // Resolve the live table name through the Step model so the
+        // CTE follows the active runtime prefix. Hardcoding `steps`
+        // here would silently scan the wrong table when a prefixed
+        // dispatcher is running.
+        $stepsTable = Step::tableName();
 
         $sql = "
             WITH RECURSIVE descendants AS (
                 SELECT child_block_uuid AS block_uuid
-                FROM steps
+                FROM {$stepsTable}
                 WHERE child_block_uuid IN ({$placeholders})
                   AND child_block_uuid IS NOT NULL
                   ".($group !== null ? "AND {$groupCol} = ?" : '').'
@@ -736,7 +742,7 @@ final class StepDispatcher
                 UNION ALL
 
                 SELECT s.child_block_uuid
-                FROM steps s
+                FROM '.$stepsTable.' s
                 INNER JOIN descendants d ON s.block_uuid = d.block_uuid
                 WHERE s.child_block_uuid IS NOT NULL
                   '.($group !== null ? "AND s.{$groupCol} = ?" : '').'
@@ -808,7 +814,12 @@ final class StepDispatcher
     ): void {
         $bucket = now()->utc()->format('Y-m-d-H-i');
         $groupKey = $group ?? 'global';
-        $prefix = "dispatcher:saturation:{$groupKey}:{$bucket}";
+        // Include the runtime prefix in the cache key so two
+        // dispatchers running different prefixes but sharing a group
+        // name (`trading_alpha` vs `calc_alpha`) don't stomp each
+        // other's saturation counters.
+        $runtimePrefix = app(RuntimeContext::class)->current();
+        $prefix = "dispatcher:saturation:{$runtimePrefix}{$groupKey}:{$bucket}";
 
         try {
             Cache::increment("{$prefix}:ticks_observed");
@@ -835,7 +846,7 @@ final class StepDispatcher
                 // cron to consume the bucket before it expires.
                 Cache::put($maxKey, $pendingAfterTick, 90);
             }
-        } catch (\Throwable) {
+        } catch (Throwable) {
             // Telemetry must never break dispatch. Swallow.
         }
     }
@@ -1023,6 +1034,22 @@ final class StepDispatcher
         $key = $step->block_uuid.'_'.($step->index - 1).'_'.$type;
 
         return isset($concludedIndicesByBlock[$key]);
+    }
+
+    /**
+     * Resolve the per-prefix active-flag file path. Default prefix
+     * `''` keeps the legacy `active.flag` filename. A prefixed
+     * dispatcher writes to `{prefix}active.flag`, e.g.
+     * `trading_active.flag`. Without per-prefix flag scoping a
+     * prefixed dispatcher going idle would deactivate the shared
+     * flag and the default dispatcher would skip its next tick on
+     * the `isActive() === false` early return — masking real work.
+     */
+    private static function flagFilePath(): string
+    {
+        $prefix = app(RuntimeContext::class)->current();
+
+        return self::flagDir().'/'.$prefix.'active.flag';
     }
 
     /**

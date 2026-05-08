@@ -8,6 +8,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Models\Step;
+use StepDispatcher\Models\StepsArchive;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\Models\StepsDispatcherTicks;
 use StepDispatcher\Support\BaseCommand;
@@ -50,7 +51,7 @@ final class PurgeStepsCommand extends BaseCommand
         if ($this->option('only-archive')) {
             $this->verboseInfo("Purging steps_archive rows older than {$days} days (before {$cutoff->toDateTimeString()})...");
 
-            $archiveDeleted = $this->batchDeleteByDate('steps_archive', $cutoff, $batchSize);
+            $archiveDeleted = $this->batchDeleteByDate(StepsArchive::tableName(), $cutoff, $batchSize);
             $this->verboseInfo("Total deleted: {$archiveDeleted} archive records.");
             $this->verboseInfo('Archive purge completed.');
 
@@ -60,7 +61,7 @@ final class PurgeStepsCommand extends BaseCommand
         $this->verboseInfo("Purging records older than {$days} days (before {$cutoff->toDateTimeString()})...");
 
         // Ticks have no tree structure — safe to purge by date alone.
-        $ticksDeleted = $this->batchDeleteByDate('steps_dispatcher_ticks', $cutoff, $batchSize);
+        $ticksDeleted = $this->batchDeleteByDate(StepsDispatcherTicks::tableName(), $cutoff, $batchSize);
         $this->verboseInfo("Total deleted: {$ticksDeleted} tick records.");
 
         // Steps must be purged tree-aware. Deleting a root whose descendants
@@ -124,12 +125,13 @@ final class PurgeStepsCommand extends BaseCommand
     {
         $terminalStates = Step::terminalStepStates();
         $placeholders = implode(',', array_fill(0, count($terminalStates), '?'));
+        $stepsTable = Step::tableName();
 
-        return DB::table('steps as s')
+        return DB::table($stepsTable.' as s')
             ->select('s.block_uuid')
-            ->whereNotExists(function ($q) {
+            ->whereNotExists(function ($q) use ($stepsTable) {
                 $q->select(DB::raw(1))
-                    ->from('steps as parent')
+                    ->from($stepsTable.' as parent')
                     ->whereColumn('parent.child_block_uuid', 's.block_uuid');
             })
             ->groupBy('s.block_uuid')
@@ -150,7 +152,7 @@ final class PurgeStepsCommand extends BaseCommand
         $queue = [$rootUuid];
 
         while (! empty($queue)) {
-            $childUuids = DB::table('steps')
+            $childUuids = DB::table(Step::tableName())
                 ->whereIn('block_uuid', $queue)
                 ->whereNotNull('child_block_uuid')
                 ->pluck('child_block_uuid')
@@ -176,7 +178,7 @@ final class PurgeStepsCommand extends BaseCommand
      */
     private function treeIsFullyTerminal(array $treeUuids): bool
     {
-        return DB::table('steps')
+        return DB::table(Step::tableName())
             ->whereIn('block_uuid', $treeUuids)
             ->whereNotIn('state', Step::terminalStepStates())
             ->doesntExist();
@@ -194,7 +196,7 @@ final class PurgeStepsCommand extends BaseCommand
         $total = 0;
 
         foreach ($chunks as $uuidChunk) {
-            $total += DB::table('steps')
+            $total += DB::table(Step::tableName())
                 ->whereIn('block_uuid', $uuidChunk)
                 ->delete();
         }

@@ -95,6 +95,13 @@ trait HandlesStepLifecycle
         $this->stepStatusUpdated = true;
     }
 
+    public function retryForConfirmation(): void
+    {
+        $this->step->update(['execution_mode' => 'confirming-completion']);
+        $this->step->state->transitionTo(Pending::class);
+        $this->stepStatusUpdated = true;
+    }
+
     /**
      * Pick the next `dispatch_after` timestamp for a retry/reschedule.
      *
@@ -121,13 +128,6 @@ trait HandlesStepLifecycle
         }
 
         return $this->jobBackoffSeconds.'s';
-    }
-
-    public function retryForConfirmation(): void
-    {
-        $this->step->update(['execution_mode' => 'confirming-completion']);
-        $this->step->state->transitionTo(Pending::class);
-        $this->stepStatusUpdated = true;
     }
     // ========================================================================
     // PREPARATION PHASE
