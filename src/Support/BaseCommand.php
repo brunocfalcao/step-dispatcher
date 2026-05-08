@@ -19,6 +19,36 @@ use Throwable;
 abstract class BaseCommand extends Command
 {
     /**
+     * Subclasses use Laravel's `$signature` shorthand. Laravel's
+     * Command constructor parses that signature into the
+     * InputDefinition AFTER calling Symfony's configure() hook —
+     * so overriding configure() to add `--prefix=` would race the
+     * signature parse and either double-add (signature includes it)
+     * or silently fail (signature is parsed later, my add is wiped).
+     *
+     * Adding it in the constructor — after `parent::__construct()`
+     * has finished signature parsing — is the only place where the
+     * definition is fully populated. The `hasOption` guard skips
+     * the add when a subclass already declares `--prefix=` in its
+     * own signature (the installer command does, since `--prefix`
+     * is its primary argument).
+     */
+    public function __construct()
+    {
+        parent::__construct();
+
+        if (! $this->getDefinition()->hasOption('prefix')) {
+            $this->getDefinition()->addOption(new InputOption(
+                'prefix',
+                null,
+                InputOption::VALUE_OPTIONAL,
+                'Runtime table prefix (e.g. trading or trading_). Empty / absent = default tables. Pushed onto RuntimeContext for the duration of the command.',
+                ''
+            ));
+        }
+    }
+
+    /**
      * Get the console command options.
      *
      * @return array<int, InputOption>
