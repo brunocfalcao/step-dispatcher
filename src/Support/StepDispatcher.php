@@ -1064,7 +1064,7 @@ final class StepDispatcher
         if (empty($path)) {
             throw new RuntimeException(
                 'step-dispatcher.flag_path is not configured. '
-                .'Set STEP_DISPATCHER_FLAG_PATH in your .env to an absolute directory path. '
+                .'Publish the step-dispatcher config or ensure storage_path() is available. '
                 .'All applications sharing the same database must point to the same path.'
             );
         }

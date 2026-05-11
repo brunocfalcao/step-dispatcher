@@ -54,7 +54,7 @@ return [
     | if not configured.
     |
     */
-    'flag_path' => env('STEP_DISPATCHER_FLAG_PATH'),
+    'flag_path' => storage_path('step-dispatcher'),
 
     /*
     |--------------------------------------------------------------------------
