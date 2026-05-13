@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.12.2 - 2026-05-13
+
+### Fixes
+
+- [BUG FIX] **`shouldDoubleCheck()` exhausted budget now fails the step instead of silently completing.** Pre-fix, two `doubleCheck() === false` returns fell through `needsVerification()` → `finalizeJobExecution()` → `shouldComplete()`, marking the step `Completed` even though verification never returned true. Unsafe for exchange-facing jobs where `doubleCheck()` is the only confirmation that an order was accepted. Now transitions to `Failed` with explanatory `error_message` so the parent's resolve-exception path runs.
+- [BUG FIX] **`retryJobWithBackoff()` now passes the computed dispatch time directly to `retryJob()`** so the database-saturation/deadlock backoff isn't overwritten by `retryJob()`'s own dispatch-time resolution. Pre-fix, the database handler's exponential delay was computed, written to `dispatch_after`, then immediately overwritten — producing a tighter retry loop than intended during DB stress.
+- [BUG FIX] **`StepDispatcher::buildStepsCache()` now scopes parent / sibling / resolve-exception lookups by `$group`** when one is supplied. Pre-fix, group-scoped pending-step selection could evaluate transitions against rows from other groups via shared block UUIDs.
+
+### Improvements
+
+- [IMPROVED] **`StepDispatcher::batchTransitionSteps()` logs failed transitions** (step id, current/target state, group, class, exception) to the `jobs` channel instead of swallowing them. Pre-fix, a stuck step would surface on the dashboard with no breadcrumb explaining why the cleanup phase missed it.
+
 ## 1.12.0 - 2026-05-08
 
 ### Features

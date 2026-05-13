@@ -204,9 +204,17 @@ trait HandlesStepExceptions
         ) {
             $backoffSeconds = $this->databaseExceptionHandler->getBackoffSeconds($this->step->retries);
 
-            $this->step->update([
-                'dispatch_after' => now()->addSeconds($backoffSeconds),
-            ]);
+            // Pass the computed dispatch time directly to retryJob() so
+            // its internal "resolve dispatch time" logic doesn't
+            // overwrite the database-specific backoff. Pre-fix, this
+            // method computed the backoff, wrote `dispatch_after`, then
+            // called `retryJob()` with no argument — retryJob then
+            // re-resolved its own dispatch time and overwrote the
+            // value, defeating the database-saturation/deadlock
+            // backoff and producing a tighter retry loop than intended.
+            $this->retryJob(now()->addSeconds($backoffSeconds));
+
+            return;
         }
 
         $this->retryJob();

@@ -204,7 +204,7 @@ final class StepDispatcher
                 ->get();
 
             $pendingSteps = $prioritySteps;
-            $stepsCache = self::buildStepsCache($pendingSteps);
+            $stepsCache = self::buildStepsCache($pendingSteps, $group);
             $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
 
             // Pass 1 fall-through: when priority='high' rows exist but NONE
@@ -785,7 +785,20 @@ final class StepDispatcher
                 // Use proper state transition - triggers transition class handle() and observers
                 $step->state->transitionTo($toState);
             } catch (Exception $e) {
-                // Log but continue - don't fail entire batch due to one invalid transition
+                // Log step id, current/target state, group, class, and
+                // exception so the operator can diagnose dispatcher
+                // wedges. Pre-fix the catch was silent — a stuck step
+                // would show up on the dashboard with no breadcrumb to
+                // explain why the cleanup phase failed to clear it.
+                Log::channel('jobs')->warning('[StepDispatcher::batchTransitionSteps] transition failed — continuing batch', [
+                    'step_id' => $step->id,
+                    'class' => $step->class ?? null,
+                    'group' => $step->group ?? null,
+                    'current_state' => is_object($step->state) ? get_class($step->state) : (string) $step->state,
+                    'target_state' => $toState,
+                    'exception' => $e::class,
+                    'message' => $e->getMessage(),
+                ]);
             }
         }
     }
@@ -864,7 +877,7 @@ final class StepDispatcher
      * @param  Collection<int, Step>  $pendingSteps
      * @return array<string, mixed>|null
      */
-    public static function buildStepsCache(Collection $pendingSteps): ?array
+    public static function buildStepsCache(Collection $pendingSteps, ?string $group = null): ?array
     {
         $blockUuids = $pendingSteps->pluck('block_uuid')->unique()->values();
 
@@ -872,17 +885,29 @@ final class StepDispatcher
             return null;
         }
 
-        $parentsByChildBlock = Step::whereIn('child_block_uuid', $blockUuids)
+        // Scope the cache queries to the active dispatcher group when
+        // one is supplied. Pre-fix, parent / sibling / resolve-exception
+        // lookups read unscoped state — a group-scoped pending-step
+        // selector could then evaluate transitions against rows from
+        // other groups. UUID collisions are unlikely, but the boundary
+        // is a real isolation contract.
+        $applyGroup = static fn ($query) => $group !== null
+            ? $query->where('group', $group)
+            : $query;
+
+        $parentsByChildBlock = $applyGroup(Step::whereIn('child_block_uuid', $blockUuids))
             ->get()
             ->keyBy('child_block_uuid');
 
-        $stepsByBlockAndIndex = Step::whereIn('block_uuid', $blockUuids)
+        $stepsByBlockAndIndex = $applyGroup(Step::whereIn('block_uuid', $blockUuids))
             ->get()
             ->groupBy(static fn (Step $s): string => $s->block_uuid.'_'.$s->index);
 
-        $pendingResolveExceptions = Step::whereIn('block_uuid', $blockUuids)
-            ->where('type', 'resolve-exception')
-            ->where('state', Pending::class)
+        $pendingResolveExceptions = $applyGroup(
+            Step::whereIn('block_uuid', $blockUuids)
+                ->where('type', 'resolve-exception')
+                ->where('state', Pending::class)
+        )
             ->pluck('block_uuid')
             ->flip()
             ->all();

@@ -9,6 +9,7 @@ use Illuminate\Support\Carbon;
 use StepDispatcher\Exceptions\MaxRetriesReachedException;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
@@ -218,8 +219,27 @@ trait HandlesStepLifecycle
 
     protected function shouldDoubleCheck(): bool
     {
-        if (! method_exists($this, 'doubleCheck') || $this->step->double_check >= 2) {
+        if (! method_exists($this, 'doubleCheck')) {
             return false;
+        }
+
+        // Exhausted double-check budget. Pre-fix, this branch fell
+        // through to needsVerification()=false → finalizeJobExecution()
+        // → shouldComplete() — the step was COMPLETED even though
+        // doubleCheck() never returned true. For exchange-facing
+        // jobs (PlaceMarketOrderJob, PlaceLimitOrderJob, …) where
+        // doubleCheck() is the only confirmation that the order was
+        // accepted, fail-open after exhaustion is unsafe — the parent
+        // workflow advances against unverified state. Fail the step
+        // explicitly so the parent's resolve-exception path runs.
+        if ($this->step->double_check >= 2) {
+            $this->step->update([
+                'error_message' => 'doubleCheck() failed twice — verification budget exhausted without confirmation',
+            ]);
+            $this->step->state->transitionTo(Failed::class);
+            $this->stepStatusUpdated = true;
+
+            return true;
         }
 
         if ($this->doubleCheck() === false) {
