@@ -118,7 +118,12 @@ final class StepObserver
         // Queue validation: fallback to 'default' if queue is not valid or empty
         // Valid queues: from config, plus 'default', 'priority', and hostname-based queue
         $validQueues = array_merge(
-            ['default', 'priority', mb_strtolower(gethostname())],
+            [
+                'default',
+                'priority',
+                mb_strtolower(gethostname()),
+                mb_strtolower(str_replace('-', '', gethostname() ?: 'unknown')),
+            ],
             config('step-dispatcher.queues.valid', [])
         );
 
