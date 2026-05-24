@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.12.3 - 2026-05-25
+
+### Features
+
+- [NEW FEATURE] **`rotateToQueue(string $queueName)` lifecycle helper.** Sibling to `retryJob()` / `skipJob()` on `HandlesStepLifecycle`. Re-routes the current step to a different queue without consuming a retry slot — designed for ban-aware IP rotation in consumer applications (Kraite: the current worker's outbound IP is blacklisted on the target exchange for an account, so the step moves onto a worker whose IP is still clean rather than retrying locally against an IP that cannot succeed). Sets `is_throttled=true` before the Running→Pending transition to skip the retry counter, clears `started_at` so the next pickup measures duration fresh, and writes a `rotated` channel log line naming the previous queue. Covered by `tests/Feature/RotateToQueueTest.php`.
+
 ## 1.12.2 - 2026-05-13
 
 ### Fixes
