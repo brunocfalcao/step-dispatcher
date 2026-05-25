@@ -104,43 +104,6 @@ trait HandlesStepLifecycle
     }
 
     /**
-     * Re-route this step to a different worker's per-hostname queue without
-     * consuming a retry slot. Used by ban-aware rotation in BaseApiableJob:
-     * when the current worker's IP is blacklisted on the target exchange for
-     * the given (account, api_system), the job is rotated onto a clean
-     * worker's queue rather than retrying locally against an IP that cannot
-     * succeed.
-     *
-     * Semantics differ from `retryJob()` on three axes:
-     *   - retries: NOT incremented (rotation is not a retry; it's a re-route).
-     *     Achieved by setting is_throttled=true before the Running→Pending
-     *     transition — the transition class skips the retry counter when
-     *     is_throttled is true.
-     *   - started_at: cleared so the next pickup measures duration fresh.
-     *   - queue: switched to $queueName for the next dispatcher tick.
-     */
-    public function rotateToQueue(string $queueName): void
-    {
-        $previousQueue = $this->step->queue;
-
-        $this->step->queue = $queueName;
-        $this->step->dispatch_after = now();
-        $this->step->started_at = null;
-        $this->step->is_throttled = true;
-        $this->step->save();
-
-        Step::log($this->step->id, 'rotated', sprintf(
-            'rotated from %s → %s (current worker blacklisted)',
-            $previousQueue ?? 'default',
-            $queueName
-        ));
-
-        $this->step->state->transitionTo(Pending::class);
-
-        $this->stepStatusUpdated = true;
-    }
-
-    /**
      * Pick the next `dispatch_after` timestamp for a retry/reschedule.
      *
      * Callers can set `jobBackoffMs` for millisecond precision (used by the

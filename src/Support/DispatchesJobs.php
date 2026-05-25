@@ -26,6 +26,35 @@ trait DispatchesJobs
         }
 
         try {
+            // Consumer-app queue routing override. When the host
+            // application has registered a queue resolver via
+            // `StepDispatcher::setQueueResolver()`, the resolver
+            // decides the physical queue the step should land on
+            // (e.g. picking a clean worker by IP affinity in Kraite).
+            // Sync steps skip the resolver entirely — synchronous
+            // execution doesn't go through a Redis queue, so routing
+            // has no meaning there.
+            //
+            // A `null` return means "no opinion" (leave step.queue
+            // alone). Any non-null string replaces step.queue and is
+            // persisted to the row so retries / debugging / horizon
+            // dashboards see the actual physical queue. A thrown
+            // NoCleanWorkerException propagates to the outer catch,
+            // which transitions the step to Failed and records the
+            // exception message on the row.
+            if ($step->queue !== 'sync') {
+                $resolver = StepDispatcher::getQueueResolver();
+
+                if ($resolver !== null) {
+                    $resolved = $resolver($step);
+
+                    if (is_string($resolved) && $resolved !== $step->queue) {
+                        $step->queue = $resolved;
+                        $step->save();
+                    }
+                }
+            }
+
             $job = self::instantiateJobWithArguments($step->class, $step->arguments);
             $job->step = $step;
 

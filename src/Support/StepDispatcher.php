@@ -29,6 +29,48 @@ final class StepDispatcher
     use DispatchesJobs;
 
     /**
+     * Optional resolver callable invoked at dispatch time to decide the
+     * physical queue a step should land on. Consumer apps register one
+     * via `setQueueResolver()` to inject routing logic (e.g. picking a
+     * clean worker by IP affinity in Kraite). When `null`, the dispatcher
+     * uses `step.queue` verbatim — i.e. the framework's default behaviour
+     * is preserved when no resolver is registered.
+     *
+     * Contract: the callable receives the Step model and returns either:
+     *   - `string`  — the physical queue name to use; dispatcher persists
+     *                 it back to `step.queue` and pushes onto that queue.
+     *   - `null`    — no opinion; dispatcher leaves `step.queue` as-is.
+     *   - throws `NoCleanWorkerException` — terminal failure; dispatcher
+     *     transitions the step to Failed via its standard try/catch.
+     *
+     * @var (callable(Step): ?string)|null
+     */
+    private static $queueResolver = null;
+
+    /**
+     * Register (or unregister with null) the queue resolver. Stored
+     * statically because the resolver applies process-wide and the
+     * dispatcher itself is invoked statically. Consumer apps typically
+     * call this from a ServiceProvider's boot() so the resolver is
+     * active for the entire request/worker lifecycle.
+     */
+    public static function setQueueResolver(?callable $resolver): void
+    {
+        self::$queueResolver = $resolver;
+    }
+
+    /**
+     * Internal accessor used by DispatchesJobs::dispatchSingleStep to
+     * resolve the physical queue before pushing onto Redis.
+     *
+     * @return (callable(Step): ?string)|null
+     */
+    public static function getQueueResolver(): ?callable
+    {
+        return self::$queueResolver;
+    }
+
+    /**
      * Check if any steps are in an active (non-idle) state.
      * Active states: Pending, Dispatched, Running.
      * Uses EXISTS for sub-millisecond performance on indexed state column.

@@ -2,11 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.12.3 - 2026-05-25
+## 1.13.0 - 2026-05-25
 
 ### Features
 
-- [NEW FEATURE] **`rotateToQueue(string $queueName)` lifecycle helper.** Sibling to `retryJob()` / `skipJob()` on `HandlesStepLifecycle`. Re-routes the current step to a different queue without consuming a retry slot — designed for ban-aware IP rotation in consumer applications (Kraite: the current worker's outbound IP is blacklisted on the target exchange for an account, so the step moves onto a worker whose IP is still clean rather than retrying locally against an IP that cannot succeed). Sets `is_throttled=true` before the Running→Pending transition to skip the retry counter, clears `started_at` so the next pickup measures duration fresh, and writes a `rotated` channel log line naming the previous queue. Covered by `tests/Feature/RotateToQueueTest.php`.
+- [NEW FEATURE] **`StepDispatcher::setQueueResolver(callable)` extensibility hook.** Consumer apps can register a closure that decides the physical queue a step should land on at dispatch time. The dispatcher invokes the closure in `DispatchesJobs::dispatchSingleStep()` before pushing to Redis. Contract: `(Step) → ?string`. Returning a non-null string overrides `step.queue` AND persists the new value to the row (queryable, observable in Horizon, retained on retry). Returning `null` means "no opinion" — the framework uses `step.queue` verbatim. Throwing `NoCleanWorkerException` propagates to the outer try/catch, which transitions the step to `Failed` and records the exception message on the row. Sync steps (`queue=sync`) bypass the resolver entirely. Optional: when no resolver is registered, the framework behaves exactly as it did pre-1.13.0 (covered by the pre-existing 63-test suite staying green). Designed for ban-aware IP routing in consumer apps like Kraite.
+- [NEW FEATURE] **`NoCleanWorkerException`** under `StepDispatcher\Exceptions\`. Used by a registered queue resolver to signal "no eligible worker for this step" as a terminal failure. The dispatcher catches it via the existing try/catch path → step transitions to `Failed`. Side effects (notifications, account state changes, audit logs) are the resolver's responsibility BEFORE throwing — the framework does not interpret the exception beyond the standard "cannot dispatch" semantic.
+
+### Removed
+
+- [REMOVED] **`HandlesStepLifecycle::rotateToQueue()`.** Shipped in v1.12.3 and removed in this release. The rotation-by-queue-name approach conflicted with the priority promotion path (`RecoverStaleStepsCommand` re-routing stuck Dispatched steps to `queue=priority` overrode the per-hostname affinity, breaking IP isolation). The successor mechanism is the dispatch-time `setQueueResolver()` hook, which moves the routing decision earlier in the lifecycle (before push) where priority and IP affinity don't collide.
 
 ## 1.12.2 - 2026-05-13
 
