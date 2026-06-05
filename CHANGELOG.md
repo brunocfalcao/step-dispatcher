@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.13.3 - 2026-06-05
+
+### Bug fixes
+
+- [FIXED] **`StepObserver::saving()` no longer rewrites `queue='priority'` on every save of a `priority='high'` step — creation-time only.** The unconditional rewrite fired during the save that persists the queue-resolver's physical name inside `dispatchSingleStep`, clobbering it back to the logical `priority` queue right before the Redis push. In consumer apps whose physical queue names diverge from the logical names (Kraite's `{hostname}-{logical}` convention since its v1.53.0), every high-priority workflow — position closes, order corrections, recover-stale promotions — was pushed onto a queue no worker subscribes to and stranded. Post-creation the queue column is owned by the registered queue resolver. Caught 2026-06-05 during Kraite's first live trading smoke test. Two regression tests added to `QueueResolverHookTest` (resolver value survives the dispatch save on priority='high' steps; creation-time auto-route still applies).
+
 ## 1.13.0 - 2026-05-25
 
 ### Features

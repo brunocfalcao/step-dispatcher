@@ -110,8 +110,17 @@ final class StepObserver
             }
         }
 
-        // Automatically route high priority steps to the priority queue
-        if ($step->priority === 'high') {
+        // Automatically route high priority steps to the priority queue —
+        // at CREATION time only. After creation the queue column is owned
+        // by the dispatch-time queue resolver (StepRouter composes the
+        // physical `{hostname}-priority` name since the v1.53.0 naming
+        // flip). Rewriting on every save clobbered the resolved physical
+        // queue back to the logical `priority` name — which no Horizon
+        // supervisor subscribes to anymore — right before the Redis push,
+        // stranding every priority='high' workflow (position closes,
+        // order corrections, recover-stale promotions) on a dead queue.
+        // Caught 2026-06-05 during the first live trading smoke test.
+        if (! $step->exists && $step->priority === 'high') {
             $step->queue = 'priority';
         }
 

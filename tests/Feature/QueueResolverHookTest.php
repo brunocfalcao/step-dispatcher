@@ -219,3 +219,49 @@ describe('Retry re-fires the resolver', function (): void {
             ->and($step->queue)->toBe('positions-iris');
     });
 });
+
+describe('Resolver override vs priority=high auto-routing (regression 2026-06-05)', function (): void {
+    it('keeps the resolver-set physical queue on priority=high steps across the dispatch save', function (): void {
+        // The bug: StepObserver::saving() rewrote queue='priority' on EVERY
+        // save of a priority='high' step — including the save that persists
+        // the resolver's physical queue inside dispatchSingleStep — so the
+        // Redis push targeted the consumer-less logical 'priority' queue.
+        config()->set('step-dispatcher.queues.valid', ['default', 'priority', 'eos-priority']);
+
+        StepDispatcher::setQueueResolver(static fn (Step $step): string => 'eos-priority');
+
+        $step = Step::create([
+            'class' => PrefixCarryingTestJob::class,
+            'block_uuid' => 'resolver-priority-test-'.uniqid(),
+            'index' => 1,
+            'type' => 'default',
+            'queue' => 'priority',
+            'priority' => 'high',
+            'group' => 'test-group',
+            'state' => Pending::class,
+        ]);
+
+        StepDispatcher::dispatch('test-group');
+
+        $step->refresh();
+        expect($step->queue)->toBe('eos-priority')
+            ->and($step->priority)->toBe('high');
+    });
+
+    it('still auto-routes priority=high steps to the logical priority queue at creation', function (): void {
+        config()->set('step-dispatcher.queues.valid', ['default', 'priority', 'positions']);
+
+        $step = Step::create([
+            'class' => PrefixCarryingTestJob::class,
+            'block_uuid' => 'priority-creation-test-'.uniqid(),
+            'index' => 1,
+            'type' => 'default',
+            'queue' => 'positions',
+            'priority' => 'high',
+            'group' => 'test-group',
+            'state' => Pending::class,
+        ]);
+
+        expect($step->queue)->toBe('priority');
+    });
+});
