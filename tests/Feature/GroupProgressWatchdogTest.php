@@ -121,3 +121,80 @@ it('does not fire group_no_progress when a group has zero Pending steps even if 
         return $event->reason === 'group_no_progress';
     });
 });
+
+it('does not fire group_no_progress when the only Pending steps in a group are throttle-waiting', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    // Throttle-waiting group: a rate-limited step (TAAPI/exchange 429)
+    // reschedules itself back into Pending with is_throttled=true. It is
+    // progressing — just unable to cross the finish line until the API
+    // window reopens — so the watchdog must stay quiet even though no
+    // terminal step has landed for 20 minutes. This is the chronic
+    // backpressure false-positive fix A targets.
+    $throttled = seedWatchdogStep([
+        'group' => 'throttled-group',
+        'state' => Pending::class,
+    ]);
+    Step::withoutEvents(function () use ($throttled) {
+        Step::where('id', $throttled->id)->update(['is_throttled' => true]);
+    });
+
+    $stale = seedWatchdogStep(['group' => 'throttled-group']);
+    Step::withoutEvents(function () use ($stale) {
+        Step::where('id', $stale->id)->update([
+            'state' => Completed::class,
+            'updated_at' => now()->subMinutes(20),
+        ]);
+    });
+
+    $this->artisan('steps:recover-stale', [
+        '--watchdog-progress' => true,
+        '--progress-threshold' => 600,
+    ])->assertSuccessful();
+
+    Event::assertNotDispatched(StaleStepsDetected::class, function (StaleStepsDetected $event) {
+        return $event->reason === 'group_no_progress'
+            && ($event->context['group'] ?? null) === 'throttled-group';
+    });
+});
+
+it('still fires group_no_progress for genuinely-waiting Pending steps and counts only non-throttled work', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    // Mixed group: one throttle-waiting step (excluded from the tally) plus
+    // one genuinely dispatchable Pending step the group cannot drain. The
+    // wedge is real for the non-throttled step → fire — but pending_count
+    // must reflect only the non-throttled tally (1, not 2), so the operator
+    // sees the true stuck-work count, not inflated by rate-limited waiters.
+    $throttled = seedWatchdogStep([
+        'group' => 'mixed-group',
+        'state' => Pending::class,
+    ]);
+    Step::withoutEvents(function () use ($throttled) {
+        Step::where('id', $throttled->id)->update(['is_throttled' => true]);
+    });
+
+    seedWatchdogStep([
+        'group' => 'mixed-group',
+        'state' => Pending::class,
+    ]);
+
+    $stale = seedWatchdogStep(['group' => 'mixed-group']);
+    Step::withoutEvents(function () use ($stale) {
+        Step::where('id', $stale->id)->update([
+            'state' => Completed::class,
+            'updated_at' => now()->subMinutes(20),
+        ]);
+    });
+
+    $this->artisan('steps:recover-stale', [
+        '--watchdog-progress' => true,
+        '--progress-threshold' => 600,
+    ])->assertSuccessful();
+
+    Event::assertDispatched(StaleStepsDetected::class, function (StaleStepsDetected $event) {
+        return $event->reason === 'group_no_progress'
+            && ($event->context['group'] ?? null) === 'mixed-group'
+            && ($event->context['pending_count'] ?? 0) === 1;
+    });
+});

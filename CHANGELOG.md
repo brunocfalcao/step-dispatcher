@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.13.4 - 2026-06-08
+
+### Bug fixes
+
+- [FIXED] **Group-progress watchdog (`steps:recover-stale --watchdog-progress`) no longer pages on throttle-induced backpressure.** `detectGroupNoProgress` counted *every* `Pending` step toward the "group can't drain" signal, including steps that had rescheduled themselves under a rate limiter (`is_throttled=true`, `dispatch_after` in the future, `updated_at` bumped on every retry bounce). Those steps are progressing — they simply cannot reach a terminal state until the API window reopens — so a group saturated by chronic TAAPI / exchange 429s showed no terminal progress for the threshold window and fired a phantom `group_no_progress` alert that always self-recovered the moment the window cleared (observed on Kraite's athena box: gamma/kappa/epsilon groups flapping under ~1000 TAAPI `/bulk` 429s per hour). The Pending tally now excludes `is_throttled` rows, so only genuinely-dispatchable-but-not-progressing work can trip the watchdog, and `pending_count` in the emitted event reflects the true stuck count. A wedged group holding non-throttled Pending work still fires exactly as before. `is_throttled` is indexed, so the added predicate is free. Two regression tests added to `GroupProgressWatchdogTest` (throttled-only group stays silent; mixed group fires counting only the non-throttled work).
+
 ## 1.13.3 - 2026-06-05
 
 ### Bug fixes

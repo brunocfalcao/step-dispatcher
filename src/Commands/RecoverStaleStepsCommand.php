@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Commands;
 
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use ReflectionClass;
 use ReflectionException;
 use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
+use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
@@ -332,7 +335,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * absorbed by `BaseStepJob::prepareJobExecution()` which bails when it
      * sees a step already in Running state.
      *
-     * @param  \Illuminate\Database\Eloquent\Builder<Step>  $query
+     * @param  Builder<Step>  $query
      */
     private function requeueDispatchedSteps($query): int
     {
@@ -368,7 +371,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
     {
         $staleThreshold = now()->subSeconds($thresholdSeconds);
 
-        $released = DB::table(\StepDispatcher\Models\StepsDispatcher::tableName())
+        $released = DB::table(StepsDispatcher::tableName())
             ->where('can_dispatch', false)
             ->where('updated_at', '<', $staleThreshold)
             ->update([
@@ -414,12 +417,25 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * the consuming app can route it to a high-priority pushover canonical.
      * Idle groups (zero Pending, no work to drain) are explicitly suppressed
      * to avoid paging on quiet 03:00 UTC windows.
+     *
+     * Throttle-waiting steps are NOT a wedge. A step rejected by a rate
+     * limiter reschedules itself (`is_throttled=true`, `dispatch_after` in
+     * the future, `updated_at` bumped on every bounce) and drops back into
+     * Pending — alive and progressing, just unable to cross the finish line
+     * until the API window reopens. Counting those toward the "can't drain"
+     * signal turns chronic TAAPI / exchange 429 backpressure into phantom
+     * `group_no_progress` pages that always self-recover the moment the
+     * window clears. We exclude `is_throttled` rows from the Pending tally
+     * so only genuinely-waiting (dispatchable-but-not-progressing) work can
+     * trip the watchdog. The `is_throttled` column is indexed, so the extra
+     * predicate is free.
      */
     private function detectGroupNoProgress(int $thresholdSeconds): void
     {
         $cutoff = now()->subSeconds($thresholdSeconds);
 
         $pendingByGroup = Step::where('state', Pending::class)
+            ->where('is_throttled', false)
             ->whereNotNull('group')
             ->groupBy('group')
             ->selectRaw('`group` as g, COUNT(*) as c')
@@ -435,7 +451,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 ->max('updated_at');
 
             $stalled = $latestTerminal === null
-                || \Illuminate\Support\Carbon::parse($latestTerminal)->lt($cutoff);
+                || Carbon::parse($latestTerminal)->lt($cutoff);
 
             if (! $stalled) {
                 continue;
