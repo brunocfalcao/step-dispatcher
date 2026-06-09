@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.13.5 - 2026-06-09
+
+### Bug fixes
+
+- [FIXED] **Group-progress watchdog (`steps:recover-stale --watchdog-progress`) no longer pages on freshly-arrived work in sparse, event-driven groups.** `detectGroupNoProgress` decided a group was stalled from two signals only — a non-empty non-throttled `Pending` tally and a last terminal-state `updated_at` older than the threshold — and never considered how long the pending work had *itself* been waiting. For groups fed at long, irregular intervals (Kraite's `trading_*` set, driven by Binance user-data WebSocket events that arrive hours apart), the previous terminal step is routinely older than the threshold the instant a new step is created, so the only missing precondition was a `Pending` step existing at read time. When the every-minute watchdog tick happened to read a step in the ~1-second window between its creation (`Pending`) and its dispatch, all conditions were briefly true and the watchdog fired a CRITICAL `group_no_progress` page on work that completed a second later. Observed 2026-06-09 on athena: `trading_steps` group `gamma` — a `ProcessUserDataEventJob` created at 18:00:01, completed at 18:00:02, paged as "wedged, no progress for 72 minutes" because the group's prior event had landed at 16:48:38. The Pending tally now also carries `MIN(created_at)`, and a group only trips the watchdog once its oldest non-throttled Pending step has itself been waiting past the threshold. A genuine wedge holds steps `Pending` well beyond the cutoff, so it still fires exactly as before; the 2026-04-25 16h-wedge shape (old unpromotable Pending steps) is unaffected. One regression test added to `GroupProgressWatchdogTest` (a brand-new Pending step in a group with a stale last terminal stays silent); the two genuine-wedge tests now age their Pending step to model a real stall.
+
 ## 1.13.4 - 2026-06-08
 
 ### Bug fixes

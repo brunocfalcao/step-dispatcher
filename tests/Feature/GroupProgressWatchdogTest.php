@@ -47,12 +47,18 @@ function seedWatchdogStep(array $attrs): Step
 it('fires StaleStepsDetected with reason=group_no_progress when a group has Pending steps but stale terminal updates', function () {
     Event::fake([StaleStepsDetected::class]);
 
-    // Group "wedged" — has Pending work but the only terminal-state step
-    // updated 20 minutes ago. Threshold is 600s (10 min) → wedge.
-    seedWatchdogStep([
+    // Group "wedged" — Pending work that has ITSELF been waiting longer than
+    // the threshold (created 20 min ago) AND the only terminal-state step
+    // updated 20 minutes ago. That is a genuine stall → fire. Aging the
+    // Pending step is what separates a real wedge from a freshly-arrived step
+    // in a sparse group (see the sparse-group false-positive test below).
+    $wedged = seedWatchdogStep([
         'group' => 'wedged-group',
         'state' => Pending::class,
     ]);
+    Step::withoutEvents(function () use ($wedged) {
+        Step::where('id', $wedged->id)->update(['created_at' => now()->subMinutes(20)]);
+    });
 
     $stale = seedWatchdogStep([
         'group' => 'wedged-group',
@@ -174,10 +180,13 @@ it('still fires group_no_progress for genuinely-waiting Pending steps and counts
         Step::where('id', $throttled->id)->update(['is_throttled' => true]);
     });
 
-    seedWatchdogStep([
+    $genuine = seedWatchdogStep([
         'group' => 'mixed-group',
         'state' => Pending::class,
     ]);
+    Step::withoutEvents(function () use ($genuine) {
+        Step::where('id', $genuine->id)->update(['created_at' => now()->subMinutes(20)]);
+    });
 
     $stale = seedWatchdogStep(['group' => 'mixed-group']);
     Step::withoutEvents(function () use ($stale) {
@@ -196,5 +205,41 @@ it('still fires group_no_progress for genuinely-waiting Pending steps and counts
         return $event->reason === 'group_no_progress'
             && ($event->context['group'] ?? null) === 'mixed-group'
             && ($event->context['pending_count'] ?? 0) === 1;
+    });
+});
+
+it('does not fire group_no_progress for a freshly-created Pending step even when the group last terminal update is stale', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    // Sparse / event-driven groups (the trading_* set, fed by irregular
+    // Binance user-data events) sit idle for hours, so the group's last
+    // terminal step is always older than the threshold the moment a new step
+    // arrives. A brand-new Pending step is NOT a wedge — it has simply not
+    // had time to drain. This reproduces the 2026-06-09 gamma false positive:
+    // a ProcessUserDataEventJob created at 18:00:01 and completed at 18:00:02,
+    // caught mid-flight by the every-minute watchdog tick, paged CRITICAL on a
+    // group whose previous event had landed 72 minutes earlier. The pending
+    // work must itself have been waiting past the threshold before we alarm.
+    seedWatchdogStep([
+        'group' => 'sparse-group',
+        'state' => Pending::class,
+    ]); // created_at = now() — brand new, well inside the threshold
+
+    $stale = seedWatchdogStep(['group' => 'sparse-group']);
+    Step::withoutEvents(function () use ($stale) {
+        Step::where('id', $stale->id)->update([
+            'state' => Completed::class,
+            'updated_at' => now()->subMinutes(72),
+        ]);
+    });
+
+    $this->artisan('steps:recover-stale', [
+        '--watchdog-progress' => true,
+        '--progress-threshold' => 600,
+    ])->assertSuccessful();
+
+    Event::assertNotDispatched(StaleStepsDetected::class, function (StaleStepsDetected $event) {
+        return $event->reason === 'group_no_progress'
+            && ($event->context['group'] ?? null) === 'sparse-group';
     });
 });

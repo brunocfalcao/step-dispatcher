@@ -411,12 +411,25 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * no Dispatched step was stuck, no lock was held. The detector found
      * nothing while four groups silently bled for ~16h.
      *
-     * Signal shape: per group, Pending count > 0 AND (no terminal-state step
-     * exists OR the most recent terminal `updated_at` is older than the
-     * threshold). Fires a `group_no_progress` event with severity=critical so
-     * the consuming app can route it to a high-priority pushover canonical.
-     * Idle groups (zero Pending, no work to drain) are explicitly suppressed
-     * to avoid paging on quiet 03:00 UTC windows.
+     * Signal shape: per group, at least one non-throttled Pending step whose
+     * own wait (oldest `created_at`) already exceeds the threshold, AND (no
+     * terminal-state step exists OR the most recent terminal `updated_at` is
+     * older than the threshold). Fires a `group_no_progress` event with
+     * severity=critical so the consuming app can route it to a high-priority
+     * pushover canonical. Idle groups (zero Pending, no work to drain) are
+     * explicitly suppressed to avoid paging on quiet 03:00 UTC windows.
+     *
+     * The oldest-pending guard is what keeps sparse, event-driven groups
+     * quiet. Groups in the trading_* set are fed by irregular Binance
+     * user-data events, so the previous terminal step is routinely hours old
+     * by the time the next step arrives. A brand-new Pending step is "alive
+     * and progressing", not wedged — it just has not drained yet — so a
+     * stale last-terminal timestamp alone must never page. Requiring the
+     * pending work itself to have aged past the threshold removes the
+     * batch-boundary race where an every-minute tick reads a step in the ~1s
+     * window between its creation and its dispatch (the 2026-06-09 gamma
+     * false positive) while preserving detection of real wedges, whose
+     * pending steps sit unpromoted well beyond the cutoff.
      *
      * Throttle-waiting steps are NOT a wedge. A step rejected by a rate
      * limiter reschedules itself (`is_throttled=true`, `dispatch_after` in
@@ -438,14 +451,36 @@ final class RecoverStaleStepsCommand extends BaseCommand
             ->where('is_throttled', false)
             ->whereNotNull('group')
             ->groupBy('group')
-            ->selectRaw('`group` as g, COUNT(*) as c')
-            ->pluck('c', 'g');
+            ->selectRaw('`group` as g, COUNT(*) as c, MIN(created_at) as oldest_pending')
+            ->get();
 
         if ($pendingByGroup->isEmpty()) {
             return;
         }
 
-        foreach ($pendingByGroup as $groupName => $pendingCount) {
+        foreach ($pendingByGroup as $row) {
+            $groupName = $row->g;
+            $pendingCount = (int) $row->c;
+
+            // A freshly-created Pending step is not a wedge — it has simply
+            // not had time to drain yet. Sparse / event-driven groups (the
+            // trading_* set, fed by irregular Binance user-data events) sit
+            // idle for hours, so the group's last terminal step is always
+            // older than the threshold the instant new work arrives. Without
+            // this guard, the every-minute watchdog tick that happens to read
+            // a step in the ~1s window between its creation and its dispatch
+            // raises a phantom critical page on work that completes a second
+            // later (the 2026-06-09 gamma false positive). Only alarm once the
+            // pending work has ITSELF been waiting longer than the threshold;
+            // a genuine wedge keeps steps Pending well past the cutoff, so its
+            // oldest pending step is always old enough to trip this.
+            $oldestPendingStale = $row->oldest_pending !== null
+                && Carbon::parse($row->oldest_pending)->lt($cutoff);
+
+            if (! $oldestPendingStale) {
+                continue;
+            }
+
             $latestTerminal = Step::whereIn('state', Step::terminalStepStates())
                 ->where('group', $groupName)
                 ->max('updated_at');
