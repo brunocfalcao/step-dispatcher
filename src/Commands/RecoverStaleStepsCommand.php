@@ -447,11 +447,16 @@ final class RecoverStaleStepsCommand extends BaseCommand
     {
         $cutoff = now()->subSeconds($thresholdSeconds);
 
+        // `group` is a reserved word; quote it through the active connection's
+        // grammar so the raw select is valid on every driver (backticks on
+        // MySQL, double-quotes on PostgreSQL) instead of hardcoding backticks.
+        $groupColumn = (new Step)->getConnection()->getQueryGrammar()->wrap('group');
+
         $pendingByGroup = Step::where('state', Pending::class)
             ->where('is_throttled', false)
             ->whereNotNull('group')
             ->groupBy('group')
-            ->selectRaw('`group` as g, COUNT(*) as c, MIN(created_at) as oldest_pending')
+            ->selectRaw($groupColumn.' as g, COUNT(*) as c, MIN(created_at) as oldest_pending')
             ->get();
 
         if ($pendingByGroup->isEmpty()) {

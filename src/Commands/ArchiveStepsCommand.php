@@ -166,16 +166,23 @@ final class ArchiveStepsCommand extends BaseCommand
     private function archiveTree(array $treeUuids): int
     {
         $columns = [
-            'id', 'block_uuid', 'type', '`group`', 'state', 'class', 'label',
-            '`index`', 'response', 'error_message', 'error_stack_trace', 'step_log',
+            'id', 'block_uuid', 'type', 'group', 'state', 'class', 'label',
+            'index', 'response', 'error_message', 'error_stack_trace', 'step_log',
             'relatable_type', 'relatable_id', 'child_block_uuid', 'execution_mode',
-            'double_check', 'tick_id', 'workflow_id', 'canonical', '`queue`',
+            'double_check', 'tick_id', 'workflow_id', 'canonical', 'queue',
             'arguments', 'retries', 'was_throttled', 'is_throttled', 'priority',
             'dispatch_after', 'started_at', 'completed_at', 'duration', 'hostname',
             'was_notified', 'created_at', 'updated_at',
         ];
 
-        $columnList = implode(', ', $columns);
+        // Quote every column through the connection's grammar so reserved words
+        // (group, index, queue) are valid in the raw INSERT…SELECT on any
+        // driver — backticks on MySQL, double-quotes on PostgreSQL.
+        $grammar = (new Step)->getConnection()->getQueryGrammar();
+        $columnList = implode(', ', array_map(
+            static fn (string $column): string => $grammar->wrap($column),
+            $columns,
+        ));
 
         // Chunk by block_uuid to avoid huge IN clauses
         $chunks = array_chunk($treeUuids, 100);
