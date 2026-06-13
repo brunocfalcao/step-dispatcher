@@ -116,11 +116,7 @@ final class StepsDispatcher extends BaseModel
 
             DB::table(self::tableName())
                 ->where('id', $dispatcher->id)
-                ->update(['last_selected_at' => DB::raw(
-                    DB::getDriverName() === 'pgsql'
-                        ? 'clock_timestamp()'
-                        : 'NOW(6)'
-                )]);
+                ->update(['last_selected_at' => DB::raw(self::currentTimestampSql())]);
 
             return $dispatcher->group;
         });
@@ -229,7 +225,7 @@ final class StepsDispatcher extends BaseModel
                 $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
                 $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
                 $durationMs = $startedAtFloat
-                    ? max(0, (int) round((microtime(true) - $startedAtFloat) * 1000))
+                    ? \StepDispatcher\Support\Timing::elapsedMs((float) $startedAtFloat)
                     : 0;
 
                 $tick->progress = $progress;

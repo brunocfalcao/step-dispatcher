@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Abstracts;
 
-use Exception;
 use Illuminate\Database\QueryException;
+use StepDispatcher\Support\DatabaseExceptionHandlers\GenericDatabaseExceptionHandler;
 use StepDispatcher\Support\DatabaseExceptionHandlers\MySqlDatabaseExceptionHandler;
 use StepDispatcher\Support\DatabaseExceptionHandlers\PgsqlDatabaseExceptionHandler;
+use StepDispatcher\Support\DatabaseExceptionHandlers\SqliteDatabaseExceptionHandler;
 use Throwable;
 
 /**
@@ -37,10 +38,14 @@ abstract class BaseDatabaseExceptionHandler
     {
         $engine ??= config('database.connections.'.config('database.default').'.driver');
 
+        // Unknown engines get the pattern-less generic handler — throwing
+        // here would make every job on that engine fail inside
+        // prepareJobExecution() before compute() even runs.
         return match ($engine) {
             'mysql', 'mariadb' => new MySqlDatabaseExceptionHandler,
             'pgsql' => new PgsqlDatabaseExceptionHandler,
-            default => throw new Exception("Unsupported database engine: {$engine}")
+            'sqlite' => new SqliteDatabaseExceptionHandler,
+            default => new GenericDatabaseExceptionHandler,
         };
     }
 

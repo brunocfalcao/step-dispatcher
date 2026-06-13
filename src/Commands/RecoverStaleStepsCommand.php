@@ -48,6 +48,12 @@ final class RecoverStaleStepsCommand extends BaseCommand
      */
     private const DEFAULT_TIMEOUT = 300;
 
+    /**
+     * Fallback recovery budget when the job class cannot be resolved or
+     * declares a non-positive `$retries`.
+     */
+    private const DEFAULT_MAX_RETRIES = 2;
+
     protected $signature = 'steps:recover-stale
                             {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
                             {--release-locks : Also release dispatcher locks held beyond the threshold}
@@ -84,9 +90,17 @@ final class RecoverStaleStepsCommand extends BaseCommand
 
     private function recoverStaleRunningSteps(): void
     {
+        // Lean hydration: skip the large-text columns (response,
+        // error_stack_trace, step_log, arguments, error_message) — the
+        // recovery path never reads them, and long-running jobs can carry
+        // megabytes there.
         $staleSteps = Step::where('state', Running::class)
             ->whereNotNull('started_at')
-            ->get();
+            ->get([
+                'id', 'block_uuid', 'child_block_uuid', 'type', 'class',
+                'label', 'state', 'group', 'queue', 'priority', 'index',
+                'retries', 'is_throttled', 'started_at', 'dispatch_after',
+            ]);
 
         if ($staleSteps->isEmpty()) {
             return;
@@ -172,38 +186,40 @@ final class RecoverStaleStepsCommand extends BaseCommand
 
     private function resolveJobTimeout(Step $step): int
     {
-        if (! $step->class || ! class_exists($step->class)) {
-            return self::DEFAULT_TIMEOUT;
-        }
-
-        try {
-            $reflection = new ReflectionClass($step->class);
-            $property = $reflection->getProperty('timeout');
-            $value = (int) $property->getDefaultValue();
-
-            // $timeout = 0 is a Laravel convention meaning "rely on the queue worker's
-            // own timeout". For stale detection we need a positive number, so fall back
-            // to DEFAULT_TIMEOUT. Without this, every such job is considered stale after
-            // 60s (0 + BUFFER), which kills legitimate long-running work.
-            return $value > 0 ? $value : self::DEFAULT_TIMEOUT;
-        } catch (ReflectionException) {
-            return self::DEFAULT_TIMEOUT;
-        }
+        // $timeout = 0 is a Laravel convention meaning "rely on the queue worker's
+        // own timeout". For stale detection we need a positive number, so fall back
+        // to DEFAULT_TIMEOUT. Without this, every such job is considered stale after
+        // 60s (0 + BUFFER), which kills legitimate long-running work.
+        return $this->resolveJobIntProperty($step, 'timeout', self::DEFAULT_TIMEOUT);
     }
 
     private function resolveJobMaxRetries(Step $step): int
     {
+        // Same guard as the timeout: a non-positive `$retries` (0 means
+        // "fail fast on business errors") must not collapse the WATCHDOG
+        // budget to zero — that would fail a step on its very first stale
+        // detection (worker death) without a single recovery attempt.
+        return $this->resolveJobIntProperty($step, 'retries', self::DEFAULT_MAX_RETRIES);
+    }
+
+    /**
+     * Reflect a job class's int property default, falling back when the
+     * class is missing, the property is absent, or the value is
+     * non-positive (stale detection always needs a positive budget).
+     */
+    private function resolveJobIntProperty(Step $step, string $property, int $fallback): int
+    {
         if (! $step->class || ! class_exists($step->class)) {
-            return 2;
+            return $fallback;
         }
 
         try {
             $reflection = new ReflectionClass($step->class);
-            $property = $reflection->getProperty('retries');
+            $value = (int) $reflection->getProperty($property)->getDefaultValue();
 
-            return (int) $property->getDefaultValue();
+            return $value > 0 ? $value : $fallback;
         } catch (ReflectionException) {
-            return 2;
+            return $fallback;
         }
     }
 
@@ -212,28 +228,36 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * true if any descendant is not in a terminal state (Completed, Skipped,
      * Cancelled, Failed, Stopped). Zero children anywhere → returns false,
      * which correctly flags a never-dispatched parent as recoverable.
+     *
+     * Level-wise walk: one query per tree level to collect the block set
+     * (visited-guarded — nothing prevents a child_block_uuid cycle), then
+     * a single non-terminal existence check across all collected blocks.
+     * The previous per-child recursion cost one query per node.
      */
     private function hasActiveDescendants(Step $parent): bool
     {
-        $children = Step::where('block_uuid', $parent->child_block_uuid)->get();
+        $visited = [$parent->child_block_uuid => true];
+        $queue = [$parent->child_block_uuid];
 
-        if ($children->isEmpty()) {
-            return false;
+        while (! empty($queue)) {
+            $childBlocks = Step::whereIn('block_uuid', $queue)
+                ->whereNotNull('child_block_uuid')
+                ->pluck('child_block_uuid')
+                ->unique();
+
+            $queue = [];
+
+            foreach ($childBlocks as $childBlock) {
+                if (! isset($visited[$childBlock])) {
+                    $visited[$childBlock] = true;
+                    $queue[] = $childBlock;
+                }
+            }
         }
 
-        $terminalStates = Step::terminalStepStates();
-
-        foreach ($children as $child) {
-            if (! in_array(get_class($child->state), $terminalStates, strict: true)) {
-                return true;
-            }
-
-            if ($child->isParent() && $this->hasActiveDescendants($child)) {
-                return true;
-            }
-        }
-
-        return false;
+        return Step::whereIn('block_uuid', array_keys($visited))
+            ->whereNotIn('state', Step::terminalStepStates())
+            ->exists();
     }
 
     // ========================================================================
@@ -450,7 +474,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
         // `group` is a reserved word; quote it through the active connection's
         // grammar so the raw select is valid on every driver (backticks on
         // MySQL, double-quotes on PostgreSQL) instead of hardcoding backticks.
-        $groupColumn = (new Step)->getConnection()->getQueryGrammar()->wrap('group');
+        $groupColumn = Step::wrapColumn('group');
 
         $pendingByGroup = Step::where('state', Pending::class)
             ->where('is_throttled', false)

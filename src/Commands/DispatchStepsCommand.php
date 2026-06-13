@@ -83,7 +83,9 @@ final class DispatchStepsCommand extends BaseCommand
             report($e);
             $this->verboseError($e->getMessage());
 
-            return self::SUCCESS;
+            // Exit non-zero: scheduler/exit-code monitoring must see a
+            // dead tick (DB gone, queue driver down) as a failure.
+            return self::FAILURE;
         }
 
         return self::SUCCESS;

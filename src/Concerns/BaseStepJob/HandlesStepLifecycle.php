@@ -46,7 +46,7 @@ trait HandlesStepLifecycle
         $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
         // Check if step should be escalated to high priority
-        if (method_exists($this, 'shouldChangeToHighPriority') && $this->shouldChangeToHighPriority() === true) {
+        if ($this->shouldChangeToHighPriority()) {
             $this->step->update(['priority' => 'high']);
         }
 
@@ -72,7 +72,7 @@ trait HandlesStepLifecycle
         $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
         // Check if step should be escalated to high priority
-        if (method_exists($this, 'shouldChangeToHighPriority') && $this->shouldChangeToHighPriority() === true) {
+        if ($this->shouldChangeToHighPriority()) {
             $this->step->update(['priority' => 'high']);
         }
 
@@ -283,8 +283,27 @@ trait HandlesStepLifecycle
         }
 
         $this->finalizeDuration();
+
+        if ($this->parentMustAwaitChildren()) {
+            $this->stepStatusUpdated = true;
+
+            return;
+        }
+
         $this->step->state->transitionTo(Completed::class);
         $this->stepStatusUpdated = true;
+    }
+
+    /**
+     * A parent job that spawned children stays Running when its own run
+     * finishes — the dispatcher's transitionParentsToComplete sweep
+     * completes it once every child concludes. Attempting the transition
+     * here would throw (RunningToCompleted::canTransition refuses
+     * unconcluded parents).
+     */
+    protected function parentMustAwaitChildren(): bool
+    {
+        return $this->step->isParent() && ! $this->step->childStepsAreConcluded();
     }
 
     // ========================================================================
@@ -295,7 +314,10 @@ trait HandlesStepLifecycle
     {
         $result = $this->compute();
 
-        if (! $result || ! is_null($this->step->response)) {
+        // Only `null` means "nothing to store". Falsy results (0, false,
+        // '', []) are legitimate payloads — step.response is an inter-step
+        // data bus and downstream readers must see them.
+        if (is_null($result) || ! is_null($this->step->response)) {
             return;
         }
 

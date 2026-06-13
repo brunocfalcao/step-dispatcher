@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace StepDispatcher\Commands;
 
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use StepDispatcher\Concerns\Commands\InteractsWithStepTrees;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsArchive;
 use StepDispatcher\Models\StepsDispatcher;
@@ -15,6 +15,8 @@ use StepDispatcher\Support\BaseCommand;
 
 final class PurgeStepsCommand extends BaseCommand
 {
+    use InteractsWithStepTrees;
+
     protected $signature = 'steps:purge
         {--days=30 : Keep records from the last N days (default: 30)}
         {--ticks : Purge ticks using the recordTickWhen callable (ignores --days for ticks)}
@@ -86,7 +88,7 @@ final class PurgeStepsCommand extends BaseCommand
      */
     private function purgeTerminalTrees(Carbon $cutoff): int
     {
-        $rootUuids = $this->findPurgeableRoots($cutoff);
+        $rootUuids = $this->findSettledRoots($cutoff);
 
         if ($rootUuids->isEmpty()) {
             return 0;
@@ -98,7 +100,7 @@ final class PurgeStepsCommand extends BaseCommand
         foreach ($rootUuids as $rootUuid) {
             $treeUuids = $this->collectTree($rootUuid);
 
-            if (! $this->treeIsFullyTerminal($treeUuids)) {
+            if (! $this->treeIsFullySettled($treeUuids)) {
                 continue;
             }
 
@@ -115,78 +117,10 @@ final class PurgeStepsCommand extends BaseCommand
     }
 
     /**
-     * Root block candidates for purge: no parent step points at this block
-     * via child_block_uuid, every step in the block is terminal, and the
-     * block's newest activity is older than the cutoff.
-     *
-     * @return Collection<int, string>
-     */
-    private function findPurgeableRoots(Carbon $cutoff): Collection
-    {
-        $terminalStates = Step::terminalStepStates();
-        $placeholders = implode(',', array_fill(0, count($terminalStates), '?'));
-        $stepsTable = Step::tableName();
-
-        return DB::table($stepsTable.' as s')
-            ->select('s.block_uuid')
-            ->whereNotExists(function ($q) use ($stepsTable) {
-                $q->select(DB::raw(1))
-                    ->from($stepsTable.' as parent')
-                    ->whereColumn('parent.child_block_uuid', 's.block_uuid');
-            })
-            ->groupBy('s.block_uuid')
-            ->havingRaw("SUM(CASE WHEN s.state NOT IN ({$placeholders}) THEN 1 ELSE 0 END) = 0", $terminalStates)
-            ->havingRaw('MAX(COALESCE(s.completed_at, s.updated_at)) < ?', [$cutoff])
-            ->pluck('s.block_uuid');
-    }
-
-    /**
-     * Walk child_block_uuid recursively to collect every block_uuid in the
-     * tree rooted at $rootUuid.
-     *
-     * @return list<string>
-     */
-    private function collectTree(string $rootUuid): array
-    {
-        $allUuids = [$rootUuid];
-        $queue = [$rootUuid];
-
-        while (! empty($queue)) {
-            $childUuids = DB::table(Step::tableName())
-                ->whereIn('block_uuid', $queue)
-                ->whereNotNull('child_block_uuid')
-                ->pluck('child_block_uuid')
-                ->unique()
-                ->values()
-                ->toArray();
-
-            if (empty($childUuids)) {
-                break;
-            }
-
-            $allUuids = array_merge($allUuids, $childUuids);
-            $queue = $childUuids;
-        }
-
-        return $allUuids;
-    }
-
-    /**
-     * Verify every step across every block_uuid in the tree is terminal.
-     *
-     * @param  list<string>  $treeUuids
-     */
-    private function treeIsFullyTerminal(array $treeUuids): bool
-    {
-        return DB::table(Step::tableName())
-            ->whereIn('block_uuid', $treeUuids)
-            ->whereNotIn('state', Step::terminalStepStates())
-            ->doesntExist();
-    }
-
-    /**
      * Delete every step row belonging to the given tree, chunked to keep
-     * the IN clause size and row locks short.
+     * the IN clause size and row locks short. Each chunk re-checks the
+     * settled invariant inside its transaction so a step revived between
+     * the outer verification and the delete is never destroyed.
      *
      * @param  list<string>  $treeUuids
      */
@@ -196,9 +130,25 @@ final class PurgeStepsCommand extends BaseCommand
         $total = 0;
 
         foreach ($chunks as $uuidChunk) {
-            $total += DB::table(Step::tableName())
-                ->whereIn('block_uuid', $uuidChunk)
-                ->delete();
+            $aborted = false;
+
+            DB::transaction(function () use ($uuidChunk, &$total, &$aborted): void {
+                if ($this->chunkWasRevived($uuidChunk)) {
+                    $aborted = true;
+
+                    return;
+                }
+
+                $total += DB::table(Step::tableName())
+                    ->whereIn('block_uuid', $uuidChunk)
+                    ->delete();
+            });
+
+            if ($aborted) {
+                $this->verboseInfo('Tree purge aborted mid-flight: a step was revived; remaining chunks left live.');
+
+                break;
+            }
         }
 
         return $total;

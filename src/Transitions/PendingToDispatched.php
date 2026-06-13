@@ -104,12 +104,25 @@ final class PendingToDispatched extends Transition
 
     public function handle(): Step
     {
-        return $this->apply();
+        return $this->apply() ?? $this->step;
     }
 
-    public function apply(): Step
+    /**
+     * Atomically claim the step for dispatch.
+     *
+     * The dispatcher evaluated canTransition() on an in-memory snapshot;
+     * external writers (operator cancels, consumer recovery commands) can
+     * move the row to a different state between selection and apply. The
+     * claim is therefore a conditional UPDATE guarded on state = Pending —
+     * a blind save() would resurrect a concurrently-cancelled step into
+     * Dispatched and execute it.
+     *
+     * Returns null when the claim is lost (row no longer Pending); callers
+     * must then skip the queue push entirely.
+     */
+    public function apply(): ?Step
     {
-        $this->step->state = new Dispatched($this->step); // Transition to Dispatched state
+        $attributes = ['state' => Dispatched::class];
 
         // If we have a tick id, let's update the step with it.
         // Cache key includes prefix + group suffix to match
@@ -120,11 +133,27 @@ final class PendingToDispatched extends Transition
         $cacheKey = "current_tick_id:{$cacheSuffix}";
 
         if (cache()->has($cacheKey)) {
-            $tickId = cache($cacheKey);
-            $this->step->tick_id = $tickId;
+            $attributes['tick_id'] = cache($cacheKey);
         }
 
-        $this->step->save();
+        $claimed = Step::query()
+            ->whereKey($this->step->id)
+            ->where('state', Pending::class)
+            ->update($attributes);
+
+        if ($claimed === 0) {
+            Step::log($this->step->id, 'states', sprintf(
+                'Pending → Dispatched SKIPPED (claim lost) | group=%s | state_now=%s',
+                $this->step->group ?? 'null',
+                get_class($this->step->fresh()->state),
+            ));
+
+            return null;
+        }
+
+        // Sync the in-memory model with what the claim wrote so the
+        // subsequent queue push (and any resolver save) sees clean state.
+        $this->step->refresh();
 
         Step::log($this->step->id, 'states', sprintf(
             'Pending → Dispatched | group=%s | tick_id=%s | queue=%s | priority=%s',

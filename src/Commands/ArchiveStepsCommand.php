@@ -5,28 +5,21 @@ declare(strict_types=1);
 namespace StepDispatcher\Commands;
 
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use StepDispatcher\Concerns\Commands\InteractsWithStepTrees;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsArchive;
-use StepDispatcher\States\Cancelled;
-use StepDispatcher\States\Completed;
-use StepDispatcher\States\Failed;
-use StepDispatcher\States\NotRunnable;
-use StepDispatcher\States\Skipped;
-use StepDispatcher\States\Stopped;
 use StepDispatcher\Support\BaseCommand;
 
 final class ArchiveStepsCommand extends BaseCommand
 {
+    use InteractsWithStepTrees;
+
     protected $signature = 'steps:archive
         {--duration=5 : Keep steps from the last N days, archive older completed trees (default: 5)}
         {--output : Display command output (silent by default)}';
 
     protected $description = 'Archive fully-resolved step trees to steps_archive table.';
-
-    /** @var list<string> States considered terminal for archiving (includes NotRunnable) */
-    private array $archivableStates;
 
     public function handle(): int
     {
@@ -40,20 +33,11 @@ final class ArchiveStepsCommand extends BaseCommand
 
         $cutoff = Carbon::now()->subDays($days);
 
-        $this->archivableStates = [
-            Completed::class,
-            Skipped::class,
-            Cancelled::class,
-            Failed::class,
-            Stopped::class,
-            NotRunnable::class,
-        ];
-
         $this->verboseInfo("Archiving step trees older than {$days} days (before {$cutoff->toDateTimeString()})...");
 
         // Phase 1: Find all archivable root block_uuids in a single query.
         $this->verboseInfo('Finding archivable root blocks...');
-        $rootUuids = $this->findAllArchivableRoots($cutoff);
+        $rootUuids = $this->findSettledRoots($cutoff);
         $this->verboseInfo("Found {$rootUuids->count()} candidate root blocks.");
 
         if ($rootUuids->isEmpty()) {
@@ -69,7 +53,7 @@ final class ArchiveStepsCommand extends BaseCommand
         foreach ($rootUuids as $rootUuid) {
             $treeUuids = $this->collectTree($rootUuid);
 
-            if (! $this->treeIsFullyTerminal($treeUuids)) {
+            if (! $this->treeIsFullySettled($treeUuids)) {
                 continue;
             }
 
@@ -85,77 +69,6 @@ final class ArchiveStepsCommand extends BaseCommand
         $this->verboseInfo("Archive completed. Trees: {$totalTrees}, steps: {$totalArchived}.");
 
         return self::SUCCESS;
-    }
-
-    /**
-     * Find ALL root block_uuids that are candidates for archiving in a single query.
-     *
-     * A root block is one where no other step has child_block_uuid = this block_uuid.
-     * Candidate roots have all steps in archivable states and latest completed_at before cutoff.
-     *
-     * @return Collection<int, string>
-     */
-    private function findAllArchivableRoots(Carbon $cutoff): Collection
-    {
-        $placeholders = $this->placeholders($this->archivableStates);
-        $stepsTable = Step::tableName();
-
-        return DB::table($stepsTable.' as s')
-            ->select('s.block_uuid')
-            ->whereNotExists(function ($q) use ($stepsTable) {
-                $q->select(DB::raw(1))
-                    ->from($stepsTable.' as parent')
-                    ->whereColumn('parent.child_block_uuid', 's.block_uuid');
-            })
-            ->groupBy('s.block_uuid')
-            ->havingRaw("SUM(CASE WHEN s.state NOT IN ({$placeholders}) THEN 1 ELSE 0 END) = 0", $this->archivableStates)
-            ->havingRaw('MAX(COALESCE(s.completed_at, s.updated_at)) < ?', [$cutoff])
-            ->pluck('s.block_uuid');
-    }
-
-    /**
-     * Collect all block_uuids in a tree starting from the root.
-     *
-     * Walks child_block_uuid relationships recursively.
-     *
-     * @return list<string>
-     */
-    private function collectTree(string $rootUuid): array
-    {
-        $allUuids = [$rootUuid];
-        $queue = [$rootUuid];
-
-        while (! empty($queue)) {
-            $childUuids = DB::table(Step::tableName())
-                ->whereIn('block_uuid', $queue)
-                ->whereNotNull('child_block_uuid')
-                ->pluck('child_block_uuid')
-                ->unique()
-                ->values()
-                ->toArray();
-
-            if (empty($childUuids)) {
-                break;
-            }
-
-            $allUuids = array_merge($allUuids, $childUuids);
-            $queue = $childUuids;
-        }
-
-        return $allUuids;
-    }
-
-    /**
-     * Verify ALL steps across ALL block_uuids in the tree are in archivable states.
-     *
-     * @param  list<string>  $treeUuids
-     */
-    private function treeIsFullyTerminal(array $treeUuids): bool
-    {
-        return DB::table(Step::tableName())
-            ->whereIn('block_uuid', $treeUuids)
-            ->whereNotIn('state', $this->archivableStates)
-            ->doesntExist();
     }
 
     /**
@@ -178,9 +91,8 @@ final class ArchiveStepsCommand extends BaseCommand
         // Quote every column through the connection's grammar so reserved words
         // (group, index, queue) are valid in the raw INSERT…SELECT on any
         // driver — backticks on MySQL, double-quotes on PostgreSQL.
-        $grammar = (new Step)->getConnection()->getQueryGrammar();
         $columnList = implode(', ', array_map(
-            static fn (string $column): string => $grammar->wrap($column),
+            static fn (string $column): string => Step::wrapColumn($column),
             $columns,
         ));
 
@@ -198,7 +110,18 @@ final class ArchiveStepsCommand extends BaseCommand
         foreach ($chunks as $uuidChunk) {
             $placeholders = implode(',', array_fill(0, count($uuidChunk), '?'));
 
-            DB::transaction(function () use ($columnList, $placeholders, $uuidChunk, $stepsTable, $archiveTable, &$totalMoved) {
+            $aborted = false;
+
+            DB::transaction(function () use ($columnList, $placeholders, $uuidChunk, $stepsTable, $archiveTable, &$totalMoved, &$aborted) {
+                // The outer tree verification ran before this transaction.
+                // A step revived in between (recover-stale requeue, retry)
+                // must not be copied to the archive and deleted while live.
+                if ($this->chunkWasRevived($uuidChunk)) {
+                    $aborted = true;
+
+                    return;
+                }
+
                 DB::statement(
                     "INSERT INTO {$archiveTable} ({$columnList})
                      SELECT {$columnList} FROM {$stepsTable}
@@ -212,16 +135,14 @@ final class ArchiveStepsCommand extends BaseCommand
 
                 $totalMoved += $deleted;
             });
+
+            if ($aborted) {
+                $this->verboseInfo('Tree archive aborted mid-flight: a step was revived; remaining chunks left live.');
+
+                break;
+            }
         }
 
         return $totalMoved;
-    }
-
-    /**
-     * Generate SQL placeholders for a list of values.
-     */
-    private function placeholders(array $values): string
-    {
-        return implode(',', array_fill(0, count($values), '?'));
     }
 }

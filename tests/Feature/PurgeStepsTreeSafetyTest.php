@@ -32,8 +32,8 @@ beforeEach(function () {
 function seedStepRow(array $attrs): Step
 {
     // Explicit non-empty group bypasses the observer's round-robin group
-    // assignment (getNextGroup), which uses MySQL-specific NOW(6) and can't
-    // run on the SQLite testing connection.
+    // assignment so these tree-safety assertions don't depend on which
+    // group getNextGroup() happens to hand out.
     return Step::create(array_merge([
         'class' => 'App\\Jobs\\TestJob',
         'type' => 'default',

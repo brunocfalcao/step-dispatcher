@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
@@ -119,6 +120,16 @@ it('failed() pushes stepPrefix and writes the Failed transition to the prefixed 
         ]);
 
         $stepId = $step->id;
+
+        // failed() only concludes steps that are mid-flight (Running or
+        // Dispatched) — a Pending step at failed() time was recovered or
+        // rescheduled by someone else and must not be clobbered. Put the
+        // row in the legitimate worker-death shape: Running.
+        DB::table('trading_steps')->where('id', $stepId)->update([
+            'state' => \StepDispatcher\States\Running::class,
+        ]);
+        $step->refresh();
+
         $job = new \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
         $job->step = $step;
         $job->stepPrefix = 'trading_';

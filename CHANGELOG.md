@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.14.0 - 2026-06-13
+
+### Features
+
+- [NEW FEATURE] **Database-engine portability — unknown engines no longer crash every job.** `BaseDatabaseExceptionHandler::for()` previously `throw`ew on any engine without a tuned handler, and because it resolves inside `prepareJobExecution()` that exception killed every step *before* `compute()` ran — so a consumer app on an unsupported driver had a fully wedged dispatcher. It now returns a pattern-less `GenericDatabaseExceptionHandler` (classifies nothing as retryable/ignorable/permanent, so DB exceptions fall through to the job's normal handling) and ships a dedicated `SqliteDatabaseExceptionHandler`, so the test suite and sqlite-backed consumers exercise the real exception path instead of a stub.
+- [NEW FEATURE] **`Timing` support helper** centralises the `microtime(true)` → whole-millisecond elapsed calculation shared by the job, dispatcher, and tick recorder, removing three subtly-different rounding sites.
+- [NEW FEATURE] **`InteractsWithStepTrees` command concern** extracts the shared tree-walk logic out of the Archive and Purge commands (each shed ~100+ lines of duplicated traversal), so tree-safety behaviour is defined once and the two commands can't drift.
+
+### Bug fixes
+
+- [FIXED] **`recover-stale` and `archive` on PostgreSQL** now quote the reserved identifiers `group` / `index` / `queue` through the query grammar instead of interpolating them raw, so those commands stop erroring on pgsql consumers.
+
+### Hardening
+
+- [IMPROVED] Broad robustness pass with new regression coverage: dispatch-claim race safety, parent-completion and stopped-parent guards, cancelled-step cascade, falsy `compute()` result handling, group-scope isolation, archive/purge tree-safety parity, dispatchability parity, group round-robin fairness, recover-stale retry-budget guard, dispatch-command exit codes, and a hot-path query budget — 115 tests pass.
+
 ## 1.13.5 - 2026-06-09
 
 ### Bug fixes

@@ -17,21 +17,22 @@ final class RunningToCompleted extends Transition
         $this->step = $step;
     }
 
+    /**
+     * Prevent parent steps from completing early: a parent may only
+     * complete once all its child steps are concluded. Living here (not
+     * as a silent early-return in handle()) keeps the state machine
+     * honest — an attempt against an unconcluded parent throws
+     * CouldNotPerformTransition instead of no-opping while the framework
+     * still fires StateChanged. Callers that legitimately race the
+     * children (the job lifecycle) check the same rule before attempting.
+     */
     public function canTransition(): bool
     {
-        return true;
+        return ! $this->step->isParent() || $this->step->childStepsAreConcluded();
     }
 
     public function handle(): Step
     {
-        /**
-         * Prevent parent steps from completing early.
-         * Only allow transition if all child steps are concluded.
-         */
-        if ($this->step->isParent() && ! $this->step->childStepsAreConcluded()) {
-            return $this->step;
-        }
-
         $this->step->state = new Completed($this->step);
         $this->step->completed_at = now();
         $this->step->is_throttled = false; // Clear throttle flag - step is no longer waiting

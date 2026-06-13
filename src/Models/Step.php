@@ -103,6 +103,21 @@ final class Step extends BaseModel
         return $instance->newQuery();
     }
 
+    /**
+     * Scope a query to the dispatcher's group lane. `null` means the
+     * NULL-group lane (group IS NULL) — never "all groups". Every query
+     * inside a dispatcher tick must use this scope so the dispatch phase
+     * and the cleanup phases agree on what a tick owns; a null-lane tick
+     * sweeping parents from named groups would race the per-group ticks
+     * that own them (the CAS lock only serializes ticks of the same group).
+     */
+    public function scopeForGroup(Builder $query, ?string $group): Builder
+    {
+        return $group === null
+            ? $query->whereNull('group')
+            : $query->where('group', $group);
+    }
+
     public static function concludedStepStates()
     {
         return [Completed::class, Skipped::class];
@@ -122,6 +137,19 @@ final class Step extends BaseModel
             Failed::class,
             Stopped::class,
         ];
+    }
+
+    /**
+     * States a step can rest in forever: every terminal state plus
+     * NotRunnable (a parked resolve-exception that was never promoted —
+     * its block concluded without needing it). This is the settled-tree
+     * contract shared by steps:archive and steps:purge; the two lists
+     * drifting apart left NotRunnable trees archivable but never
+     * purgeable.
+     */
+    public static function settledStepStates(): array
+    {
+        return array_merge(self::terminalStepStates(), [NotRunnable::class]);
     }
 
     /**

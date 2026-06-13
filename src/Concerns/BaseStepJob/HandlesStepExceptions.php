@@ -228,6 +228,15 @@ trait HandlesStepExceptions
         }
 
         $this->finalizeDuration();
+
+        // Same rule as completeIfNotHandled(): an unconcluded parent stays
+        // Running for the dispatcher's transitionParentsToComplete sweep.
+        if ($this->parentMustAwaitChildren()) {
+            $this->stepStatusUpdated = true;
+
+            return;
+        }
+
         $this->step->state->transitionTo(Completed::class);
         $this->stepStatusUpdated = true;
     }

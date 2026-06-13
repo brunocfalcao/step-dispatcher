@@ -35,9 +35,9 @@ function seedArchiveRow(Carbon $createdAt, array $overrides = []): int
 }
 
 /**
- * Insert a live steps row with explicit created_at, bypassing the
- * Step observer's group round-robin (which depends on MySQL NOW(6)
- * and breaks on SQLite).
+ * Insert a live steps row with explicit created_at and an explicit
+ * group, so the assertions don't depend on which group the observer's
+ * round-robin happens to assign.
  */
 function seedLiveStepRow(Carbon $createdAt): Step
 {

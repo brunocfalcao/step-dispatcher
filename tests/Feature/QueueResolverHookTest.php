@@ -220,6 +220,34 @@ describe('Retry re-fires the resolver', function (): void {
     });
 });
 
+describe('Resolver physical queues survive queue validation', function (): void {
+    it('keeps a resolver-set physical queue that is NOT in queues.valid', function (): void {
+        // Production resolvers (Kraite StepRouter) compose physical queue
+        // names like "{hostname}-{logical}" (eos-positions, tyche-priority).
+        // Those names are NOT enumerable in queues.valid — the host pool is
+        // dynamic. The observer's queue validation must therefore only act
+        // at creation time; after creation the queue column is owned by the
+        // dispatch-time resolver.
+        config()->set('step-dispatcher.queues.valid', ['default', 'positions']);
+
+        StepDispatcher::setQueueResolver(static fn (Step $step): string => 'eos-positions');
+
+        $step = makePendingStep('positions');
+        StepDispatcher::dispatch('test-group');
+
+        $step->refresh();
+        expect($step->queue)->toBe('eos-positions');
+    });
+
+    it('still falls back to default for an invalid queue at creation time', function (): void {
+        config()->set('step-dispatcher.queues.valid', ['default', 'positions']);
+
+        $step = makePendingStep('made-up-queue-nobody-consumes');
+
+        expect($step->queue)->toBe('default');
+    });
+});
+
 describe('Resolver override vs priority=high auto-routing (regression 2026-06-05)', function (): void {
     it('keeps the resolver-set physical queue on priority=high steps across the dispatch save', function (): void {
         // The bug: StepObserver::saving() rewrote queue='priority' on EVERY

@@ -17,10 +17,12 @@ use StepDispatcher\Concerns\BaseStepJob\FormatsStepResult;
 use StepDispatcher\Concerns\BaseStepJob\HandlesStepExceptions;
 use StepDispatcher\Concerns\BaseStepJob\HandlesStepLifecycle;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\ExceptionParser;
 use StepDispatcher\Support\RuntimeContext;
+use StepDispatcher\Support\Timing;
 use Throwable;
 
 /*
@@ -222,8 +224,13 @@ abstract class BaseStepJob implements ShouldQueue
             // Finalize duration
             $this->finalizeDuration();
 
-            // Transition to Failed state (only if not already in a terminal state)
-            if (! $this->step->state instanceof Failed) {
+            // Only Running/Dispatched may fail here. Terminal states
+            // (Cancelled, Stopped, …) have no registered transition to
+            // Failed — attempting one throws out of failed(). And a step
+            // already back in Pending was recovered by someone else
+            // (recover-stale requeue); failing it would erase that
+            // recovery.
+            if ($this->step->state instanceof Running || $this->step->state instanceof Dispatched) {
                 $this->step->state->transitionTo(Failed::class);
             }
         } finally {
@@ -238,9 +245,15 @@ abstract class BaseStepJob implements ShouldQueue
 
     final public function finalizeDuration(): void
     {
-        $durationMs = abs((int) ((microtime(true) - $this->startMicrotime) * 1000));
+        // startMicrotime is only stamped when handle() actually ran. When
+        // failed() fires for a job that never started (Horizon timeout
+        // while queued), computing (now - 0.0) would persist a ~55-year
+        // duration; leave duration unknown instead.
+        if ($this->startMicrotime <= 0.0) {
+            return;
+        }
 
-        $this->step->update(['duration' => $durationMs]);
+        $this->step->update(['duration' => Timing::elapsedMs($this->startMicrotime)]);
     }
 
     final public function uuid(): string
@@ -252,10 +265,14 @@ abstract class BaseStepJob implements ShouldQueue
      * Determine if this step should be escalated to high priority.
      * Default: escalate when step has reached 50% of max retries.
      * Override in child jobs for custom priority escalation logic.
+     *
+     * Jobs with a non-positive retry budget never escalate — a zero
+     * budget would make the threshold 0.0 and flag every step 'high'
+     * before its first retry.
      */
     protected function shouldChangeToHighPriority(): bool
     {
-        return $this->step->retries >= ($this->retries / 2);
+        return $this->retries > 0 && $this->step->retries >= ($this->retries / 2);
     }
 
     protected function prepareJobExecution(): bool

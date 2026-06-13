@@ -234,7 +234,7 @@ final class StepDispatcher
             // priority_max_per_tick knob.
 
             $baseQuery = static fn () => Step::pending()
-                ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
+                ->forGroup($group)
                 ->where(static function ($q) {
                     $q->whereNull('dispatch_after')
                         ->orWhere('dispatch_after', '<=', now());
@@ -269,15 +269,20 @@ final class StepDispatcher
                 }
 
                 $pendingSteps = $pendingQuery->get();
-                $stepsCache = self::buildStepsCache($pendingSteps);
+                $stepsCache = self::buildStepsCache($pendingSteps, $group);
                 $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
             }
 
-            // Apply transitions for all dispatchable steps
+            // Apply transitions for all dispatchable steps. apply() is an
+            // atomic claim (UPDATE ... WHERE state = Pending) — a null
+            // return means an external writer moved the step (e.g. a
+            // cancel) between selection and claim; never push those.
             $dispatchableSteps->each(static function (Step $step) use ($dispatchedSteps, $stepsCache) {
                 $transition = new PendingToDispatched($step, $stepsCache);
-                $transition->apply();
-                $dispatchedSteps->push($step);
+
+                if ($transition->apply() !== null) {
+                    $dispatchedSteps->push($step);
+                }
             });
 
             // Dispatch all steps that are ready
@@ -302,7 +307,7 @@ final class StepDispatcher
             $wasCapped = $maxPerTick > 0 && $dispatchableCount >= $maxPerTick;
             $pendingAfterTick = $wasCapped
                 ? Step::pending()
-                    ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
+                    ->forGroup($group)
                     ->where(static function ($q) {
                         $q->whereNull('dispatch_after')
                             ->orWhere('dispatch_after', '<=', now());
@@ -333,7 +338,7 @@ final class StepDispatcher
                 'Tick finished | group=%s | progress=%d | duration_ms=%d',
                 $group ?? 'NULL',
                 $progress,
-                (int) round((microtime(true) - $tickStartedAt) * 1000),
+                Timing::elapsedMs($tickStartedAt),
             ));
 
             // Check if any active steps remain; deactivate if idle
@@ -349,7 +354,7 @@ final class StepDispatcher
     public static function transitionParentsToComplete(?string $group = null): bool
     {
         $runningParents = Step::where('state', Running::class)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->whereNotNull('child_block_uuid')
             ->orderBy('index')
             ->orderBy('id')
@@ -362,7 +367,7 @@ final class StepDispatcher
         $childBlockUuids = self::collectAllNestedChildBlocks($runningParents, $group);
 
         $childStepsByBlock = Step::whereIn('block_uuid', $childBlockUuids)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->get()
             ->groupBy('block_uuid');
 
@@ -414,7 +419,7 @@ final class StepDispatcher
     public static function skipAllChildStepsOnParentAndChildSingleStep(?string $group = null): bool
     {
         $skippedParents = Step::where('state', Skipped::class)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->whereNotNull('child_block_uuid')
             ->get();
 
@@ -432,7 +437,7 @@ final class StepDispatcher
         // rejected by the state machine (silently swallowed by
         // batchTransitionSteps) and counts as zero work done.
         $descendantIds = Step::whereIn('block_uuid', $allChildBlocks)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->whereNotIn('state', Step::terminalStepStates())
             ->pluck('id')
             ->all();
@@ -452,83 +457,7 @@ final class StepDispatcher
      */
     public static function transitionParentsToFailed(?string $group = null): bool
     {
-        $runningParents = Step::where('state', Running::class)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
-            ->whereNotNull('child_block_uuid')
-            ->get();
-
-        if ($runningParents->isEmpty()) {
-            return false;
-        }
-
-        $childBlockUuids = $runningParents->pluck('child_block_uuid')->filter()->unique()->all();
-
-        $childStepsByBlock = Step::whereIn('block_uuid', $childBlockUuids)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
-            ->get()
-            ->groupBy('block_uuid');
-
-        foreach ($runningParents as $parentStep) {
-            $childSteps = $childStepsByBlock->get($parentStep->child_block_uuid, collect());
-
-            if ($childSteps->isEmpty()) {
-                continue;
-            }
-
-            // Only check for Failed children (not Stopped - that's handled by transitionParentsToStopped)
-            $failedChildSteps = $childSteps->filter(
-                static fn ($step) => get_class($step->state) === Failed::class
-            );
-
-            if ($failedChildSteps->isNotEmpty()) {
-                $failedIds = $failedChildSteps->pluck('id')->join(', ');
-
-                // Check if there are any non-terminal resolve-exception steps in the child block.
-                // If so, wait for them to complete before failing the parent.
-                $nonTerminalResolveExceptions = $childSteps->filter(
-                    static function ($step) {
-                        return $step->type === 'resolve-exception'
-                            && ! in_array(get_class($step->state), Step::terminalStepStates(), strict: true);
-                    }
-                );
-
-                if ($nonTerminalResolveExceptions->isNotEmpty()) {
-                    continue;
-                }
-
-                // Get the indices of all failed children to check parallel siblings
-                $failedIndices = $failedChildSteps->pluck('index')->unique();
-
-                // Check if there are any non-terminal siblings at the same index as the failed children.
-                // When steps run in parallel (same index), we must wait for ALL to reach terminal state.
-                $nonTerminalParallelSiblings = $childSteps->filter(
-                    static function ($step) use ($failedIndices) {
-                        // Only check steps at the same index as failed steps
-                        if (! $failedIndices->contains($step->index)) {
-                            return false;
-                        }
-
-                        // Skip steps that are already in terminal state
-                        return ! in_array(get_class($step->state), Step::terminalStepStates(), strict: true);
-                    }
-                );
-
-                if ($nonTerminalParallelSiblings->isNotEmpty()) {
-                    continue;
-                }
-
-                // Set error message before transitioning to Failed
-                $parentStep->update([
-                    'error_message' => "Child step(s) failed: [{$failedIds}]",
-                ]);
-
-                $parentStep->state->transitionTo(Failed::class);
-
-                return true;
-            }
-        }
-
-        return false;
+        return self::transitionParentsOnChildOutcome($group, Failed::class, 'failed');
     }
 
     /**
@@ -536,8 +465,24 @@ final class StepDispatcher
      */
     public static function transitionParentsToStopped(?string $group = null): bool
     {
+        return self::transitionParentsOnChildOutcome($group, Stopped::class, 'stopped');
+    }
+
+    /**
+     * Shared parent-conclusion sweep: when a child reaches $childOutcome
+     * (Failed/Stopped), its Running parent follows — but only after two
+     * wait-gates that both outcomes share:
+     *
+     *   1. Non-terminal resolve-exception steps in the child block get to
+     *      run first (they may repair the block).
+     *   2. Parallel siblings at the SAME index as the concluded child must
+     *      all reach a terminal state first — concluding the parent while
+     *      a sibling is still Running would orphan that sibling's outcome.
+     */
+    private static function transitionParentsOnChildOutcome(?string $group, string $childOutcome, string $label): bool
+    {
         $runningParents = Step::where('state', Running::class)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->whereNotNull('child_block_uuid')
             ->get();
 
@@ -548,7 +493,7 @@ final class StepDispatcher
         $childBlockUuids = $runningParents->pluck('child_block_uuid')->filter()->unique()->all();
 
         $childStepsByBlock = Step::whereIn('block_uuid', $childBlockUuids)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->get()
             ->groupBy('block_uuid');
 
@@ -559,38 +504,75 @@ final class StepDispatcher
                 continue;
             }
 
-            // Check for Stopped children
-            $stoppedChildSteps = $childSteps->filter(
-                static fn ($step) => get_class($step->state) === Stopped::class
+            $concludedChildSteps = $childSteps->filter(
+                static fn ($step) => get_class($step->state) === $childOutcome
             );
 
-            if ($stoppedChildSteps->isNotEmpty()) {
-                $stoppedIds = $stoppedChildSteps->pluck('id')->join(', ');
-
-                // Set error message before transitioning to Stopped
-                $parentStep->update([
-                    'error_message' => "Child step(s) stopped: [{$stoppedIds}]",
-                ]);
-
-                $parentStep->state->transitionTo(Stopped::class);
-
-                return true;
+            if ($concludedChildSteps->isEmpty()) {
+                continue;
             }
+
+            // Wait-gate 1: non-terminal resolve-exception steps run first.
+            $nonTerminalResolveExceptions = $childSteps->filter(
+                static function ($step) {
+                    return $step->type === 'resolve-exception'
+                        && ! in_array(get_class($step->state), Step::terminalStepStates(), strict: true);
+                }
+            );
+
+            if ($nonTerminalResolveExceptions->isNotEmpty()) {
+                continue;
+            }
+
+            // Wait-gate 2: all parallel siblings at the same index must be
+            // terminal before the parent concludes.
+            $concludedIndices = $concludedChildSteps->pluck('index')->unique();
+
+            $nonTerminalParallelSiblings = $childSteps->filter(
+                static function ($step) use ($concludedIndices) {
+                    if (! $concludedIndices->contains($step->index)) {
+                        return false;
+                    }
+
+                    return ! in_array(get_class($step->state), Step::terminalStepStates(), strict: true);
+                }
+            );
+
+            if ($nonTerminalParallelSiblings->isNotEmpty()) {
+                continue;
+            }
+
+            $childIds = $concludedChildSteps->pluck('id')->join(', ');
+
+            // Set error message before transitioning
+            $parentStep->update([
+                'error_message' => "Child step(s) {$label}: [{$childIds}]",
+            ]);
+
+            $parentStep->state->transitionTo($childOutcome);
+
+            return true;
         }
 
         return false;
     }
 
     /**
-     * Cancel downstream runnable steps after a failure/stop.
+     * Cancel downstream runnable steps after a failure/stop/cancellation.
      */
     public static function cascadeCancelledSteps(?string $group = null): bool
     {
         $cancellationsOccurred = false;
 
-        // Find all failed/stopped steps that should trigger downstream cancellation.
-        $failedSteps = Step::whereIn('state', Step::failedStepStates())
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+        // Find all failed/stopped/cancelled steps that should trigger
+        // downstream cancellation. Cancelled is included because consumers
+        // cancel in-flight steps externally (direct state write, bypassing
+        // the state machine — e.g. Kraite's RecoverPositionsCommand);
+        // Cancelled is terminal but not "concluded", so successors at
+        // higher indexes would otherwise sit Pending forever and wedge
+        // the block.
+        $failedSteps = Step::whereIn('state', array_merge(Step::failedStepStates(), [Cancelled::class]))
+            ->forGroup($group)
             ->whereNotNull('index')
             ->get();
 
@@ -603,7 +585,7 @@ final class StepDispatcher
 
             // Cancel only non-terminal, runnable steps at higher indexes in the same block.
             $stepsToCancel = Step::where('block_uuid', $blockUuid)
-                ->when($group !== null, static fn ($q) => $q->where('group', $group))
+                ->forGroup($group)
                 ->where('index', '>', $failedStep->index)
                 ->whereNotIn('state', array_merge(Step::terminalStepStates(), [NotRunnable::class]))
                 ->where('type', 'default')
@@ -652,7 +634,7 @@ final class StepDispatcher
         $childBlockUuid = $parentStep->child_block_uuid;
 
         $childStepIds = Step::where('block_uuid', $childBlockUuid)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->where('state', Pending::class)
             ->pluck('id')
             ->all();
@@ -668,7 +650,7 @@ final class StepDispatcher
     public static function promoteResolveExceptionSteps(?string $group = null): bool
     {
         $candidateBlocks = Step::where('type', 'resolve-exception')
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->where('state', NotRunnable::class)
             ->pluck('block_uuid')
             ->filter()
@@ -680,7 +662,7 @@ final class StepDispatcher
         }
 
         $failingBlocks = Step::whereIn('block_uuid', $candidateBlocks)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->where('type', '<>', 'resolve-exception')
             ->whereIn('state', Step::failedStepStates())
             ->pluck('block_uuid')
@@ -694,7 +676,7 @@ final class StepDispatcher
         $block = $failingBlocks->first();
 
         $stepIds = Step::where('block_uuid', $block)
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->where('type', 'resolve-exception')
             ->where('state', NotRunnable::class)
             ->pluck('id')
@@ -723,7 +705,7 @@ final class StepDispatcher
     {
         // Also include Cancelled - a cancelled parent must also cancel its children recursively
         $failedOrStoppedParents = Step::whereIn('state', [Failed::class, Stopped::class, Cancelled::class])
-            ->when($group !== null, static fn ($q) => $q->where('group', $group))
+            ->forGroup($group)
             ->whereNotNull('child_block_uuid')
             ->get();
 
@@ -735,7 +717,7 @@ final class StepDispatcher
             $childBlock = $parent->child_block_uuid;
 
             $nonTerminalChildIds = Step::where('block_uuid', $childBlock)
-                ->when($group !== null, static fn ($q) => $q->where('group', $group))
+                ->forGroup($group)
                 ->whereNotIn('state', Step::terminalStepStates())
                 ->pluck('id')
                 ->all();
@@ -766,28 +748,40 @@ final class StepDispatcher
 
         $placeholders = implode(separator: ',', array: array_fill(0, $rootBlocks->count(), '?'));
 
-        $groupCol = DB::getQueryGrammar()->wrap('group');
+        // Quote `group` through the Step's OWN connection grammar — the
+        // default-connection grammar could differ from the connection the
+        // Step model actually uses.
+        $groupCol = Step::wrapColumn('group');
         // Resolve the live table name through the Step model so the
         // CTE follows the active runtime prefix. Hardcoding `steps`
         // here would silently scan the wrong table when a prefixed
         // dispatcher is running.
         $stepsTable = Step::tableName();
 
+        // Same lane semantics as Step::forGroup(): null means the
+        // NULL-group lane, never "all groups".
+        //
+        // The depth column bounds the recursion: nothing in the schema
+        // prevents a child_block_uuid cycle, and an unbounded recursive
+        // CTE on one would loop forever (sqlite) or abort the tick with
+        // a driver recursion error (MySQL/PostgreSQL). Real trees are a
+        // handful of levels deep; 100 is a generous ceiling.
         $sql = "
             WITH RECURSIVE descendants AS (
-                SELECT child_block_uuid AS block_uuid
+                SELECT child_block_uuid AS block_uuid, 1 AS depth
                 FROM {$stepsTable}
                 WHERE child_block_uuid IN ({$placeholders})
                   AND child_block_uuid IS NOT NULL
-                  ".($group !== null ? "AND {$groupCol} = ?" : '').'
+                  ".($group !== null ? "AND {$groupCol} = ?" : "AND {$groupCol} IS NULL").'
 
                 UNION ALL
 
-                SELECT s.child_block_uuid
+                SELECT s.child_block_uuid, d.depth + 1
                 FROM '.$stepsTable.' s
                 INNER JOIN descendants d ON s.block_uuid = d.block_uuid
                 WHERE s.child_block_uuid IS NOT NULL
-                  '.($group !== null ? "AND s.{$groupCol} = ?" : '').'
+                  AND d.depth < 100
+                  '.($group !== null ? "AND s.{$groupCol} = ?" : "AND s.{$groupCol} IS NULL").'
             )
             SELECT DISTINCT block_uuid FROM descendants
         ';
@@ -927,29 +921,28 @@ final class StepDispatcher
             return null;
         }
 
-        // Scope the cache queries to the active dispatcher group when
-        // one is supplied. Pre-fix, parent / sibling / resolve-exception
-        // lookups read unscoped state — a group-scoped pending-step
-        // selector could then evaluate transitions against rows from
-        // other groups. UUID collisions are unlikely, but the boundary
-        // is a real isolation contract.
-        $applyGroup = static fn ($query) => $group !== null
-            ? $query->where('group', $group)
-            : $query;
-
-        $parentsByChildBlock = $applyGroup(Step::whereIn('child_block_uuid', $blockUuids))
+        // Scope the cache queries to the active dispatcher group lane.
+        // Pre-fix, parent / sibling / resolve-exception lookups read
+        // unscoped state — a group-scoped pending-step selector could
+        // then evaluate transitions against rows from other groups.
+        // UUID collisions are unlikely, but the boundary is a real
+        // isolation contract.
+        $parentsByChildBlock = Step::whereIn('child_block_uuid', $blockUuids)
+            ->forGroup($group)
             ->get()
             ->keyBy('child_block_uuid');
 
-        $stepsByBlockAndIndex = $applyGroup(Step::whereIn('block_uuid', $blockUuids))
-            ->get()
+        $blockSteps = Step::whereIn('block_uuid', $blockUuids)
+            ->forGroup($group)
+            ->get();
+
+        $stepsByBlockAndIndex = $blockSteps
             ->groupBy(static fn (Step $s): string => $s->block_uuid.'_'.$s->index);
 
-        $pendingResolveExceptions = $applyGroup(
-            Step::whereIn('block_uuid', $blockUuids)
-                ->where('type', 'resolve-exception')
-                ->where('state', Pending::class)
-        )
+        // Derived in PHP from the block fetch above — the same rows; a
+        // third SELECT for this subset was a wasted round-trip per tick.
+        $pendingResolveExceptions = $blockSteps
+            ->filter(static fn (Step $s): bool => $s->type === 'resolve-exception' && $s->state instanceof Pending)
             ->pluck('block_uuid')
             ->flip()
             ->all();

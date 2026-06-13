@@ -30,41 +30,9 @@ final class StepObserver
             $step->index = 1;
         }
 
-        // Workflow ID inheritance:
-        // 1) If explicit workflow_id provided, use it (genesis step)
-        // 2) If parent step exists, inherit from parent
-        // 3) If sibling step in same block_uuid has one, inherit
-        // 4) Otherwise, generate new UUID
-        if (empty($step->workflow_id)) {
-            if (! empty($step->block_uuid)) {
-                // First, check if there's a parent step that spawned this child block
-                $parentStep = Step::query()
-                    ->where('child_block_uuid', $step->block_uuid)
-                    ->whereNotNull('workflow_id')
-                    ->first();
-
-                if ($parentStep) {
-                    $step->workflow_id = $parentStep->workflow_id;
-                }
-
-                // If no parent, look for siblings in the same block
-                if (empty($step->workflow_id)) {
-                    $siblingStep = Step::query()
-                        ->where('block_uuid', $step->block_uuid)
-                        ->whereNotNull('workflow_id')
-                        ->first();
-
-                    if ($siblingStep) {
-                        $step->workflow_id = $siblingStep->workflow_id;
-                    }
-                }
-            }
-
-            // If still no workflow_id, generate new UUID (new workflow)
-            if (empty($step->workflow_id)) {
-                $step->workflow_id = Str::uuid()->toString();
-            }
-        }
+        // workflow_id / priority / group inheritance happens in saving()
+        // (which Eloquent fires BEFORE creating on inserts) from a single
+        // consolidated parent lookup — see saving().
     }
 
     public function saving(Step $step): void
@@ -75,38 +43,97 @@ final class StepObserver
             $step->hostname = null;
         }
 
-        // Priority inheritance:
-        // Child steps spawned by a `priority='high'` parent inherit
-        // priority='high' so the entire workflow chain stays on the
-        // priority lane. Without this, priority routing is exactly one
-        // step deep — every child step would fall back to priority=null
-        // and get blocked behind any normal-FIFO backlog, defeating the
-        // latency isolation that priority='high' was meant to provide.
+        // Inheritance — at CREATION time only, from ONE consolidated
+        // parent lookup (a parent is the step whose `child_block_uuid`
+        // matches this step's `block_uuid`):
+        //
+        //   workflow_id — chain identity flows down the tree; falls back
+        //     to a sibling in the same block, else a fresh UUID.
+        //
+        //   priority — children spawned by a priority='high' parent
+        //     inherit 'high' so the whole workflow chain stays on the
+        //     priority lane. Only when `priority` is null on the new
+        //     step — explicit priority on the child wins. Production
+        //     trigger (2026-05-01): an observer-dispatched
+        //     PreparePositionReplacementJob (priority='high') spawned
+        //     children at priority=null; SmartReplaceOrdersJob landed
+        //     behind 150 pending non-priority steps, stalling the SL
+        //     recreation.
+        //
+        //   group — the dispatcher lane; falls back to a sibling, else
+        //     round-robin. Creation-only, so a step never changes lane
+        //     mid-flight.
         //
         // Runs in `saving` (not `creating`) because Eloquent fires
         // `saving` before `creating`, and the priority→queue routing
-        // below depends on the inherited value being set first.
-        //
-        // The parent lookup mirrors workflow_id inheritance: a parent
-        // is the step whose `child_block_uuid` matches this step's
-        // `block_uuid`. Only inherits when `priority` is null on the
-        // new step — explicit priority on the child wins (a child can
-        // opt out of priority by passing 'normal' / 'low' explicitly).
-        //
-        // Production trigger (2026-05-01): an observer-dispatched
-        // PreparePositionReplacementJob (priority='high') ran on the
-        // priority queue, spawned VerifyPositionExistsOnExchangeJob
-        // and SmartReplaceOrdersJob children — both at priority=null.
-        // SmartReplaceOrdersJob landed in group `beta` behind 150
-        // pending non-priority steps, stalling the SL recreation.
-        if (! $step->exists && $step->priority === null && ! empty($step->block_uuid)) {
-            $parentStep = Step::query()
-                ->where('child_block_uuid', $step->block_uuid)
-                ->where('priority', 'high')
-                ->first();
+        // below depends on the inherited priority being set first.
+        // Bulk block creation fires this per row — that is why the
+        // previous three separate parent lookups were collapsed into one.
+        if (! $step->exists && ! empty($step->block_uuid)) {
+            $needsWorkflow = empty($step->workflow_id);
+            $needsPriority = $step->priority === null;
+            $needsGroup = empty($step->group);
 
-            if ($parentStep !== null) {
+            $parentStep = ($needsWorkflow || $needsPriority || $needsGroup)
+                ? Step::query()->where('child_block_uuid', $step->block_uuid)->first()
+                : null;
+
+            if ($needsWorkflow && $parentStep !== null && ! empty($parentStep->workflow_id)) {
+                $step->workflow_id = $parentStep->workflow_id;
+                $needsWorkflow = false;
+            }
+
+            if ($needsPriority && $parentStep !== null && $parentStep->priority === 'high') {
                 $step->priority = 'high';
+            }
+
+            if ($needsGroup && $parentStep !== null && ! empty($parentStep->group)) {
+                $step->group = $parentStep->group;
+                $needsGroup = false;
+            }
+
+            // Sibling fallbacks (same block) only when the parent lookup
+            // didn't resolve the field — the uncommon path.
+            if ($needsWorkflow) {
+                $siblingStep = Step::query()
+                    ->where('block_uuid', $step->block_uuid)
+                    ->whereNotNull('workflow_id')
+                    ->first();
+
+                if ($siblingStep !== null) {
+                    $step->workflow_id = $siblingStep->workflow_id;
+                    $needsWorkflow = false;
+                }
+            }
+
+            if ($needsGroup) {
+                $siblingStep = Step::query()
+                    ->where('block_uuid', $step->block_uuid)
+                    ->whereNotNull('group')
+                    ->first();
+
+                if ($siblingStep !== null) {
+                    $step->group = $siblingStep->group;
+                    $needsGroup = false;
+                }
+            }
+
+            if ($needsWorkflow) {
+                $step->workflow_id = Str::uuid()->toString();
+            }
+
+            if ($needsGroup) {
+                $step->group = Step::getDispatchGroup();
+            }
+        } elseif (! $step->exists) {
+            // No block context at all (block_uuid is defaulted later, in
+            // creating()): fresh workflow, round-robin group.
+            if (empty($step->workflow_id)) {
+                $step->workflow_id = Str::uuid()->toString();
+            }
+
+            if (empty($step->group)) {
+                $step->group = Step::getDispatchGroup();
             }
         }
 
@@ -124,20 +151,30 @@ final class StepObserver
             $step->queue = 'priority';
         }
 
-        // Queue validation: fallback to 'default' if queue is not valid or empty
+        // Queue validation: fallback to 'default' if queue is not valid or
+        // empty — at CREATION time only, same ownership rule as the
+        // priority auto-route above. After creation the queue column is
+        // owned by the dispatch-time queue resolver, which composes
+        // physical "{hostname}-{logical}" names (eos-positions,
+        // tyche-priority) from a dynamic host pool that queues.valid can
+        // never enumerate. Validating on every save reset those resolved
+        // names to 'default' on the resolver's own persist inside
+        // dispatchSingleStep — silently defeating IP-affinity routing.
         // Valid queues: from config, plus 'default', 'priority', and hostname-based queue
-        $validQueues = array_merge(
-            [
-                'default',
-                'priority',
-                mb_strtolower(gethostname()),
-                mb_strtolower(str_replace('-', '', gethostname() ?: 'unknown')),
-            ],
-            config('step-dispatcher.queues.valid', [])
-        );
+        if (! $step->exists) {
+            $validQueues = array_merge(
+                [
+                    'default',
+                    'priority',
+                    mb_strtolower(gethostname()),
+                    mb_strtolower(str_replace('-', '', gethostname() ?: 'unknown')),
+                ],
+                config('step-dispatcher.queues.valid', [])
+            );
 
-        if (empty($step->queue) || ! in_array($step->queue, $validQueues, strict: true)) {
-            $step->queue = 'default';
+            if (empty($step->queue) || ! in_array($step->queue, $validQueues, strict: true)) {
+                $step->queue = 'default';
+            }
         }
 
         // Set started_at when transitioning TO Running state (if not already set)
@@ -174,37 +211,14 @@ final class StepObserver
             $step->is_throttled = false;
         }
 
-        // Ensure group is never null on updates
-        if (empty($step->group)) {
-            if (! empty($step->block_uuid)) {
-                // First, check if there's a parent step that spawned this child block
-                $parentStep = Step::query()
-                    ->where('child_block_uuid', $step->block_uuid)
-                    ->whereNotNull('group')
-                    ->first();
-
-                if ($parentStep) {
-                    $step->group = $parentStep->group;
-                }
-
-                // If no parent, look for siblings in the same block
-                if (empty($step->group)) {
-                    $siblingStep = Step::query()
-                        ->where('block_uuid', $step->block_uuid)
-                        ->whereNotNull('group')
-                        ->first();
-
-                    if ($siblingStep) {
-                        $step->group = $siblingStep->group;
-                    }
-                }
-            }
-
-            // If still no group (no parent/sibling found or first step in chain), assign via round-robin
-            if (empty($step->group)) {
-                $step->group = Step::getDispatchGroup();
-            }
-        }
+        // Group backfill happens in the consolidated creation-time
+        // inheritance block above — at CREATION time only. The group is
+        // the dispatcher's isolation lane; reassigning it on a later save
+        // (e.g. a state transition of a raw-inserted null-group row) would
+        // move the step between lanes mid-flight, so the tick that owns it
+        // and the tick that picks it up next would disagree. Rows created
+        // outside Eloquent (raw inserts) that carry group=NULL stay in the
+        // NULL lane permanently and are served by null-lane ticks.
     }
 
     public function created(Step $step): void

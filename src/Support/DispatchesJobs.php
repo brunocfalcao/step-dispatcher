@@ -11,6 +11,7 @@ use ReflectionClass;
 use ReflectionException;
 use RuntimeException;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use Throwable;
 
@@ -71,24 +72,29 @@ trait DispatchesJobs
                 Queue::pushOn($step->queue, $job);
             }
         } catch (Throwable $e) {
-            $step->update(['error_message' => ExceptionParser::with($e)->friendlyMessage()]);
-            $step->update(['error_stack_trace' => ExceptionParser::with($e)->stackTrace()]);
-
-            // Only transition to Failed if not already in a terminal state
+            // Re-read state first: the dispatch tick put this step in
+            // Dispatched, but recover-stale (or an operator) may have moved
+            // it concurrently — e.g. requeued it to Pending. Only fail the
+            // step when it is still in OUR Dispatched state; transitioning
+            // a requeued step to Failed would erase that recovery (Pending
+            // → Failed is a registered transition, so it would succeed).
             $step->refresh();
 
-            $terminalStates = Step::terminalStepStates();
-            $isTerminal = collect($terminalStates)->contains(static function ($state) use ($step) {
-                return $step->state->equals($state);
-            });
+            if ($step->state instanceof Dispatched) {
+                $parser = ExceptionParser::with($e);
 
-            if (! $isTerminal) {
+                $step->update([
+                    'error_message' => $parser->friendlyMessage(),
+                    'error_stack_trace' => $parser->stackTrace(),
+                ]);
+
                 $step->state->transitionTo(Failed::class);
             }
 
             Log::error('[DispatchSingleStep] EXCEPTION: '.$e->getMessage(), [
                 'step_id' => $step->id,
                 'class' => $step->class,
+                'state' => get_class($step->state),
             ]);
         }
     }
