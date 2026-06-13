@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.14.1 - 2026-06-13
+
+### Hardening
+
+- [IMPROVED] **Direct regression coverage for the job execution engine** — the suite grew from 115 to 178 tests. The dispatcher tick, cleanup phases, prefixing and recover-stale paths were already well covered, but `BaseStepJob` and its lifecycle/exception traits were only exercised indirectly. New focused tests pin: the full `HandlesStepExceptions` decision tree (retry / ignore / resolve-hook / fail / permanent-DB-fail-fast / max-retries shortcut / transient-DB-retry, including branch precedence); every database exception handler (MySQL / PostgreSQL / SQLite / generic fallback) plus the `make()` factory routing and exponential-backoff cap; the lifecycle reschedule helpers (`retryJob` burns a retry, `rescheduleWithoutRetry` throttles without burning one, the millisecond backoff override, `retryForConfirmation`, and the max-retries cap); the double-check verification budget (pass → complete, fail → retry, exhausted → fail-closed); the `handle()` guard chain (`startOrStop` / `startOrSkip` / `startOrFail` / `startOrRetry`) and `prepareJobExecution` terminal/duplicate-Running bail-outs; confirming-completion execution mode; `DispatchesJobs` argument resolution (named-arg mapping, missing-arg diagnostic, no-class fail); `ExceptionParser` (plain throwables and Guzzle JSON `{code,msg}` extraction); `Timing::elapsedMs` clamp-to-zero; the `Step` tree-relationship helpers; `StepObserver` creation defaults; `HasConditionalUpdates`; and tick recording (`recordTickWhen` discard/keep) with the slow-dispatch callback. Test-only change — no runtime behaviour modified.
+
 ## 1.14.0 - 2026-06-13
 
 ### Features

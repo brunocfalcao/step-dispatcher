@@ -676,7 +676,7 @@ Pest 3. Integration tests run against a real MySQL — the state machine's concu
 composer test
 ```
 
-70 tests, ~1 s on a modern dev box. CI matrix covers PHP 8.2 / 8.3 / 8.4 and Laravel 11 / 12 / 13.
+178 tests, ~2 s on a modern dev box. CI matrix covers PHP 8.2 / 8.3 / 8.4 and Laravel 11 / 12 / 13.
 
 ---
 
