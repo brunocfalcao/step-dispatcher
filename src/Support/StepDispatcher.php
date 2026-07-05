@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use RuntimeException;
+use StepDispatcher\Enums\WorkflowState;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Cancelled;
@@ -68,6 +69,54 @@ final class StepDispatcher
     public static function getQueueResolver(): ?callable
     {
         return self::$queueResolver;
+    }
+
+
+    /**
+     * The canonical global state of a workflow, aggregated over every live
+     * step carrying the workflow_id (parent and child blocks alike).
+     * Consumers must use this instead of hand-rolled queries — semantics
+     * live here and nowhere else. See Enums\WorkflowState for the contract;
+     * key nuances: a promoted resolve-exception recovering a failure keeps
+     * the workflow Running, while a COMPLETED recovery still reads Failed
+     * (recovery restores a stable state, not a successful one), and
+     * archived workflows read Unknown — archived is archived.
+     */
+    public static function workflowState(string $workflowId): WorkflowState
+    {
+        $rows = Step::where('workflow_id', $workflowId)
+            ->toBase()
+            ->get(['state', 'type']);
+
+        if ($rows->isEmpty()) {
+            return WorkflowState::Unknown;
+        }
+
+        $inFlight = [Dispatched::class, Running::class];
+
+        if ($rows->contains(fn (object $row): bool => in_array($row->state, $inFlight, true))) {
+            return WorkflowState::Running;
+        }
+
+        $isDormantResolver = fn (object $row): bool => $row->type === 'resolve-exception'
+            && $row->state === NotRunnable::class;
+
+        $pending = $rows->filter(fn (object $row): bool => $row->state === Pending::class);
+
+        if ($pending->isNotEmpty()) {
+            $started = $rows->contains(fn (object $row): bool => $row->state !== Pending::class
+                && ! $isDormantResolver($row));
+
+            return $started ? WorkflowState::Running : WorkflowState::Pending;
+        }
+
+        $failedStates = [Failed::class, Stopped::class, Cancelled::class];
+
+        if ($rows->contains(fn (object $row): bool => in_array($row->state, $failedStates, true))) {
+            return WorkflowState::Failed;
+        }
+
+        return WorkflowState::Completed;
     }
 
     /**

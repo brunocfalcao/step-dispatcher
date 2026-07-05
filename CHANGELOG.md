@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.15.0 - 2026-07-05
+
+### Added
+
+- `StepDispatcher::workflowState(string $workflowId): WorkflowState` — the canonical one-word global state of a workflow (`unknown` / `pending` / `running` / `failed` / `completed`), aggregated over every live step carrying the workflow_id. Consumers should call this instead of hand-rolling aggregation queries; the semantics live in exactly one place.
+- `StepDispatcher\Enums\WorkflowState` backed enum with `isSettled()`.
+
+### Semantics
+
+- A promoted resolve-exception step recovering a failure keeps the workflow `running`.
+- A COMPLETED resolve-exception recovery still reads `failed` — recovery restores a stable state, not a successful one.
+- Dormant (never promoted) NotRunnable resolvers are ignored on both the `pending` and `completed` sides.
+- Archived workflows read `unknown` — archived is archived, no fallback lookup.
+
 ## 1.14.1 - 2026-06-13
 
 ### Hardening
