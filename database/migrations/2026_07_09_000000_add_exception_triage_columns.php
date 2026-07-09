@@ -48,23 +48,36 @@ return new class extends Migration
     }
 
     /**
-     * Every live + archive steps table in the current schema, any prefix.
-     * Dispatcher/ticks/saturation tables don't carry step rows and are
-     * excluded by the exact-suffix match.
+     * Every live + archive steps table in the CURRENT database, any prefix.
+     * Two traps this filter dodges (both hit in the wild on first run):
+     * cross-schema leakage — getTables() can surface same-named tables from
+     * sibling databases the connection user can see (an unrelated
+     * `wizard_steps` in another local schema) — and foreign tables that
+     * merely end in `_steps`. A table only qualifies when it exists in this
+     * database AND carries the dispatcher's shape (block_uuid + state).
      *
      * @return list<string>
      */
     private function triageTables(): array
     {
+        $database = Schema::getConnection()->getDatabaseName();
+
         $names = array_map(
             static fn (array $table): string => $table['name'],
-            Schema::getTables(),
+            array_filter(
+                Schema::getTables(),
+                static fn (array $table): bool => ($table['schema'] ?? null) === null
+                    || $table['schema'] === $database,
+            ),
         );
 
         return array_values(array_filter(
             $names,
             static fn (string $name): bool => (bool) preg_match('/^(?:\w+_)?steps(?:_archive)?$/', $name)
-                && ! str_contains($name, 'dispatcher'),
+                && ! str_contains($name, 'dispatcher')
+                && Schema::hasTable($name)
+                && Schema::hasColumn($name, 'block_uuid')
+                && Schema::hasColumn($name, 'state'),
         ));
     }
 };
