@@ -60,17 +60,16 @@ return new class extends Migration
      */
     private function triageTables(): array
     {
-        $database = Schema::getConnection()->getDatabaseName();
-
         $names = array_map(
             static fn (array $table): string => $table['name'],
-            array_filter(
-                Schema::getTables(),
-                static fn (array $table): bool => ($table['schema'] ?? null) === null
-                    || $table['schema'] === $database,
-            ),
+            Schema::getTables(),
         );
 
+        // hasTable/hasColumn resolve against the CURRENT connection schema,
+        // so a same-named table leaking in from a sibling database fails the
+        // guard even though getTables() listed it. No schema-name comparison
+        // here on purpose — sqlite reports 'main', pgsql 'public', neither
+        // matches getDatabaseName().
         return array_values(array_filter(
             $names,
             static fn (string $name): bool => (bool) preg_match('/^(?:\w+_)?steps(?:_archive)?$/', $name)
