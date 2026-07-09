@@ -69,6 +69,7 @@ final class Step extends BaseModel
 
         'was_throttled' => 'boolean',
         'is_throttled' => 'boolean',
+        'exception_analysed' => 'boolean',
 
         'state' => StepStatus::class,
     ];
@@ -121,6 +122,27 @@ final class Step extends BaseModel
     public static function concludedStepStates()
     {
         return [Completed::class, Skipped::class];
+    }
+
+    /**
+     * Mark this step's exception as analysed — the operator has triaged the
+     * failure and doesn't want it surfaced again. Deliberately NOT a state
+     * (the step stays Failed); it's a triage flag on top of the state machine.
+     */
+    public function exceptionWasAnalysed(): void
+    {
+        $this->update(['exception_analysed' => true]);
+    }
+
+    /**
+     * Persist a diagnosis (e.g. an AI-generated verdict) alongside the
+     * failure so it can be re-read later. Storing a verdict does not mark
+     * the exception analysed — reading a diagnosis and resolving the
+     * failure are separate operator actions.
+     */
+    public function storeExceptionVerdict(string $verdict): void
+    {
+        $this->update(['exception_verdict' => $verdict]);
     }
 
     public static function failedStepStates()

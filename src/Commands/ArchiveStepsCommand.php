@@ -80,7 +80,8 @@ final class ArchiveStepsCommand extends BaseCommand
     {
         $columns = [
             'id', 'block_uuid', 'type', 'group', 'state', 'class', 'label',
-            'index', 'response', 'error_message', 'error_stack_trace', 'step_log',
+            'index', 'response', 'error_message', 'error_stack_trace',
+            'exception_analysed', 'exception_verdict', 'step_log',
             'relatable_type', 'relatable_id', 'child_block_uuid', 'execution_mode',
             'double_check', 'tick_id', 'workflow_id', 'canonical', 'queue',
             'arguments', 'retries', 'was_throttled', 'is_throttled', 'priority',

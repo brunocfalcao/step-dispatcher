@@ -111,6 +111,8 @@ final class InstallPrefixedTablesCommand extends BaseCommand
             $blueprint->longText('response')->nullable();
             $blueprint->text('error_message')->nullable();
             $blueprint->longText('error_stack_trace')->nullable();
+            $blueprint->tinyInteger('exception_analysed')->default(0);
+            $blueprint->longText('exception_verdict')->nullable();
             $blueprint->text('step_log')->nullable();
             $blueprint->string('relatable_type')->nullable()->index();
             $blueprint->unsignedBigInteger('relatable_id')->nullable()->index();
@@ -210,6 +212,8 @@ final class InstallPrefixedTablesCommand extends BaseCommand
             $blueprint->longText('response')->nullable();
             $blueprint->text('error_message')->nullable();
             $blueprint->longText('error_stack_trace')->nullable();
+            $blueprint->tinyInteger('exception_analysed')->default(0);
+            $blueprint->longText('exception_verdict')->nullable();
             $blueprint->text('step_log')->nullable();
             $blueprint->string('relatable_type')->nullable();
             $blueprint->unsignedBigInteger('relatable_id')->nullable();
