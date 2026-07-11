@@ -19,8 +19,10 @@ use StepDispatcher\Transitions\DispatchedToCancelled;
 use StepDispatcher\Transitions\DispatchedToFailed;
 use StepDispatcher\Transitions\DispatchedToPending;
 use StepDispatcher\Transitions\DispatchedToRunning;
+use StepDispatcher\Transitions\DispatchedToSkipped;
 use StepDispatcher\Transitions\NotRunnableToCancelled;
 use StepDispatcher\Transitions\NotRunnableToPending;
+use StepDispatcher\Transitions\NotRunnableToSkipped;
 use StepDispatcher\Transitions\PendingToCancelled;
 use StepDispatcher\Transitions\PendingToDispatched;
 use StepDispatcher\Transitions\PendingToFailed;
@@ -53,6 +55,13 @@ abstract class StepStatus extends State
             ->allowTransition(Dispatched::class, Cancelled::class, DispatchedToCancelled::class)
             ->allowTransition(Dispatched::class, Failed::class, DispatchedToFailed::class)
             ->allowTransition(Dispatched::class, Pending::class, DispatchedToPending::class)
+            // Deliberate: a Skipped parent's sweep must be able to skip a
+            // descendant the dispatcher already claimed but whose queue job
+            // never reached Running (lost payload, deserialization death).
+            // Without it the sweep reselected the row forever and wedged the
+            // group's tick. Safe: prepareJobExecution bails on terminal
+            // states if the queued job later materializes.
+            ->allowTransition(Dispatched::class, Skipped::class, DispatchedToSkipped::class)
 
             ->allowTransition(Running::class, Completed::class, RunningToCompleted::class)
             ->allowTransition(Running::class, Stopped::class, RunningToStopped::class)
@@ -62,6 +71,10 @@ abstract class StepStatus extends State
 
             ->allowTransition(NotRunnable::class, Pending::class, NotRunnableToPending::class)
             ->allowTransition(NotRunnable::class, Cancelled::class, NotRunnableToCancelled::class)
+            // Same sweep-safety rationale as Dispatched → Skipped: a dormant
+            // resolver under a skipped parent must be skippable, or the sweep
+            // reselects it on every tick.
+            ->allowTransition(NotRunnable::class, Skipped::class, NotRunnableToSkipped::class)
 
             ->registerState([
                 Pending::class,

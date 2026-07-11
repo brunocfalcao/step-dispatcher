@@ -6,7 +6,9 @@ use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
+use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\StepDispatcher;
 
@@ -140,4 +142,60 @@ it('promoteResolveExceptionSteps source guards against returning true on empty w
         .'when stepIds is empty (race with a parallel tick that already promoted the resolve-exception), '
         .'returning true blocks the dispatcher just like the skipAll bug.'
     );
+});
+
+/**
+ * F2 regression (code-review 01-P1): a Dispatched descendant of a Skipped
+ * parent previously had no Dispatched -> Skipped edge. The sweep reselected
+ * it every tick, the transition threw (swallowed), and the unconditional
+ * `return true` starved the dispatch phase forever. Now the edge exists AND
+ * the phase reports honest progress from the actual transition count.
+ */
+it('skips a Dispatched descendant of a Skipped parent and reports real progress', function () {
+    $childBlock = (string) Str::uuid();
+
+    $parent = seedCleanupStep(['child_block_uuid' => $childBlock]);
+    forceCleanupState($parent, Skipped::class);
+
+    $dispatchedChild = seedCleanupStep(['block_uuid' => $childBlock]);
+    forceCleanupState($dispatchedChild, Dispatched::class);
+
+    // First tick: real work — the Dispatched child transitions to Skipped.
+    expect(StepDispatcher::skipAllChildStepsOnParentAndChildSingleStep('cleanup-test'))->toBeTrue()
+        ->and($dispatchedChild->fresh()->state)->toBeInstanceOf(Skipped::class);
+
+    // Second tick: nothing left to do — must yield to the dispatch phase.
+    expect(StepDispatcher::skipAllChildStepsOnParentAndChildSingleStep('cleanup-test'))->toBeFalse();
+});
+
+it('skips a NotRunnable dormant resolver under a Skipped parent', function () {
+    $childBlock = (string) Str::uuid();
+
+    $parent = seedCleanupStep(['child_block_uuid' => $childBlock]);
+    forceCleanupState($parent, Skipped::class);
+
+    $dormantResolver = seedCleanupStep([
+        'block_uuid' => $childBlock,
+        'type' => 'resolve-exception',
+    ]);
+    forceCleanupState($dormantResolver, NotRunnable::class);
+
+    expect(StepDispatcher::skipAllChildStepsOnParentAndChildSingleStep('cleanup-test'))->toBeTrue()
+        ->and($dormantResolver->fresh()->state)->toBeInstanceOf(Skipped::class)
+        ->and(StepDispatcher::skipAllChildStepsOnParentAndChildSingleStep('cleanup-test'))->toBeFalse();
+});
+
+it('batchTransitionSteps returns the count of transitions that actually happened', function () {
+    $movable = seedCleanupStep([]);
+    forceCleanupState($movable, Dispatched::class);
+
+    // Completed -> Skipped is unregistered: contributes zero to the count.
+    $immovable = seedCleanupStep([]);
+    forceCleanupState($immovable, Completed::class);
+
+    $count = StepDispatcher::batchTransitionSteps([$movable->id, $immovable->id], Skipped::class);
+
+    expect($count)->toBe(1)
+        ->and($movable->fresh()->state)->toBeInstanceOf(Skipped::class)
+        ->and($immovable->fresh()->state)->toBeInstanceOf(Completed::class);
 });

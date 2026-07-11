@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.17.0 - 2026-07-12
+
+### Fixed
+
+- [FIXED] **Skipped-parent sweep could wedge a whole dispatcher group forever.** `skipAllChildStepsOnParentAndChildSingleStep()` selected every non-terminal descendant of a Skipped parent and unconditionally returned `true` (work-done → early-return the tick). A `Dispatched` descendant had no `Dispatched → Skipped` transition, so `batchTransitionSteps()` swallowed the failed transition, the row stayed `Dispatched`, and the sweep reselected it every tick — never reaching the dispatch phase for that group. This is the 2026-04-25 wedge class, re-armed through the gap the earlier terminal-state fix left. Two layers: a deliberate `Dispatched → Skipped` transition (safe — `prepareJobExecution` bails on terminal states if the queued job later materializes) and an honest progress report — the sweep now returns `true` only when a transition actually happened.
+
+### Added
+
+- `StepDispatcher\Transitions\DispatchedToSkipped` and `NotRunnableToSkipped` — a parent's Skipped sweep can now skip a descendant the dispatcher already claimed (`Dispatched`) or a dormant resolver (`NotRunnable`) under it, instead of reselecting the row on every tick.
+- `batchTransitionSteps()` now returns `int` (the count of transitions that actually succeeded) so callers that early-return on "work done" can't mistake a swallowed, no-op transition for progress.
+
 ## 1.15.0 - 2026-07-05
 
 ### Added

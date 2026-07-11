@@ -71,7 +71,6 @@ final class StepDispatcher
         return self::$queueResolver;
     }
 
-
     /**
      * The canonical global state of a workflow, aggregated over every live
      * step carrying the workflow_id (parent and child blocks alike).
@@ -495,9 +494,13 @@ final class StepDispatcher
             return false;
         }
 
-        self::batchTransitionSteps($descendantIds, Skipped::class);
-
-        return true;
+        // Honest progress report: only a transition that actually happened
+        // counts as work. A descendant whose edge is unregistered would be
+        // reselected every tick — returning true for it would early-return
+        // the dispatcher before its dispatch phase, forever (the F2 wedge
+        // class from the 2026-04-25 incident, re-armed via Dispatched rows
+        // until DispatchedToSkipped existed).
+        return self::batchTransitionSteps($descendantIds, Skipped::class) > 0;
     }
 
     /**
@@ -856,12 +859,20 @@ final class StepDispatcher
      * - Additional fields set (completed_at, is_throttled, etc.)
      *
      * Previous implementation used DB::table()->update() which bypassed ALL of this.
+     *
+     * Returns the number of steps that actually transitioned. Callers that
+     * early-return the dispatcher tick on "work done" MUST use this count,
+     * not the candidate list size — a candidate whose transition throws
+     * (unregistered edge) is zero work, and treating it as progress
+     * re-selects it forever and starves the dispatch phase.
      */
-    public static function batchTransitionSteps(array $stepIds, string $toState): void
+    public static function batchTransitionSteps(array $stepIds, string $toState): int
     {
         if (empty($stepIds)) {
-            return;
+            return 0;
         }
+
+        $transitioned = 0;
 
         $steps = Step::whereIn('id', $stepIds)->get();
 
@@ -869,6 +880,7 @@ final class StepDispatcher
             try {
                 // Use proper state transition - triggers transition class handle() and observers
                 $step->state->transitionTo($toState);
+                $transitioned++;
             } catch (Exception $e) {
                 // Log step id, current/target state, group, class, and
                 // exception so the operator can diagnose dispatcher
@@ -886,6 +898,8 @@ final class StepDispatcher
                 ]);
             }
         }
+
+        return $transitioned;
     }
 
     /**
