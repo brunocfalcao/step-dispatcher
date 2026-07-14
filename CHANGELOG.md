@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.18.0 - 2026-07-14
+
+### Added
+
+- Reusable Step query scopes for workflow classes, relatable models, non-terminal rows, and actively progressing rows.
+- `Step::hasLiveWorkflow()` as the shared existence check for consumers that must prevent duplicate live workflows.
+
 ## 1.17.0 - 2026-07-12
 
 ### Fixed

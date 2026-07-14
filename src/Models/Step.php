@@ -6,6 +6,7 @@ namespace StepDispatcher\Models;
 
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Spatie\ModelStates\HasStates;
 use StepDispatcher\Abstracts\BaseModel;
 use StepDispatcher\Abstracts\StepStatus;
@@ -13,6 +14,7 @@ use StepDispatcher\Concerns\Step\HasActions;
 use StepDispatcher\Concerns\Step\HasStepLogging;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
@@ -105,44 +107,20 @@ final class Step extends BaseModel
     }
 
     /**
-     * Scope a query to the dispatcher's group lane. `null` means the
-     * NULL-group lane (group IS NULL) — never "all groups". Every query
-     * inside a dispatcher tick must use this scope so the dispatch phase
-     * and the cleanup phases agree on what a tick owns; a null-lane tick
-     * sweeping parents from named groups would race the per-group ticks
-     * that own them (the CAS lock only serializes ticks of the same group).
+     * @param  class-string|array<int, class-string>  $classes
      */
-    public function scopeForGroup(Builder $query, ?string $group): Builder
+    public static function hasLiveWorkflow(Model $relatable, string|array $classes): bool
     {
-        return $group === null
-            ? $query->whereNull('group')
-            : $query->where('group', $group);
+        return self::query()
+            ->forClasses($classes)
+            ->forRelatable($relatable)
+            ->inProgress()
+            ->exists();
     }
 
     public static function concludedStepStates()
     {
         return [Completed::class, Skipped::class];
-    }
-
-    /**
-     * Mark this step's exception as analysed — the operator has triaged the
-     * failure and doesn't want it surfaced again. Deliberately NOT a state
-     * (the step stays Failed); it's a triage flag on top of the state machine.
-     */
-    public function exceptionWasAnalysed(): void
-    {
-        $this->update(['exception_analysed' => true]);
-    }
-
-    /**
-     * Persist a diagnosis (e.g. an AI-generated verdict) alongside the
-     * failure so it can be re-read later. Storing a verdict does not mark
-     * the exception analysed — reading a diagnosis and resolving the
-     * failure are separate operator actions.
-     */
-    public function storeExceptionVerdict(string $verdict): void
-    {
-        $this->update(['exception_verdict' => $verdict]);
     }
 
     public static function failedStepStates()
@@ -181,6 +159,87 @@ final class Step extends BaseModel
     public static function getDispatchGroup(): ?string
     {
         return StepsDispatcher::getDispatchGroup();
+    }
+
+    /**
+     * Scope a query to the dispatcher's group lane. `null` means the
+     * NULL-group lane (group IS NULL) — never "all groups". Every query
+     * inside a dispatcher tick must use this scope so the dispatch phase
+     * and the cleanup phases agree on what a tick owns; a null-lane tick
+     * sweeping parents from named groups would race the per-group ticks
+     * that own them (the CAS lock only serializes ticks of the same group).
+     */
+    public function scopeForGroup(Builder $query, ?string $group): Builder
+    {
+        return $group === null
+            ? $query->whereNull('group')
+            : $query->where('group', $group);
+    }
+
+    /**
+     * @param  class-string|array<int, class-string>  $classes
+     */
+    public function scopeForClasses(Builder $query, string|array $classes): Builder
+    {
+        $column = $query->getModel()->qualifyColumn('class');
+
+        return is_array($classes)
+            ? $query->whereIn($column, $classes)
+            : $query->where($column, $classes);
+    }
+
+    /**
+     * Steps not in a terminal state. NotRunnable deliberately remains here:
+     * it is settled, but it is not a terminal state in the dispatcher state
+     * machine.
+     */
+    public function scopeNonTerminal(Builder $query): Builder
+    {
+        return $query->whereNotIn(
+            $query->getModel()->qualifyColumn('state'),
+            self::terminalStepStates(),
+        );
+    }
+
+    /**
+     * Steps that can still be picked up or are currently executing.
+     */
+    public function scopeInProgress(Builder $query): Builder
+    {
+        return $query->whereIn(
+            $query->getModel()->qualifyColumn('state'),
+            [Pending::class, Dispatched::class, Running::class],
+        );
+    }
+
+    public function scopeForRelatable(Builder $query, Model $relatable): Builder
+    {
+        $model = $query->getModel();
+
+        return $query
+            ->where($model->qualifyColumn('relatable_type'), $relatable->getMorphClass())
+            ->where($model->qualifyColumn('relatable_id'), $relatable->getKey());
+    }
+
+    /**
+     * Mark this step's exception as analysed — the operator has triaged the
+     * failure and doesn't want it surfaced again. Deliberately NOT a state
+     * (the step stays Failed); it's a triage flag on top of the state machine.
+     */
+    public function exceptionWasAnalysed(): void
+    {
+        $this->update(['exception_analysed' => true]);
+    }
+
+    /**
+     * Persist a diagnosis (e.g. an AI-generated verdict) alongside the
+     * failure so it can be re-read later. Storing a verdict does not mark
+     * the exception analysed — reading a diagnosis and resolving the
+     * failure are separate operator actions.
+     */
+    public function storeExceptionVerdict(string $verdict): void
+    {
+        $this->update(['exception_verdict' => $verdict]);
     }
 
     /**
