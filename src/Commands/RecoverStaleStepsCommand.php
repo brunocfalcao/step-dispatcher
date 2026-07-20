@@ -106,6 +106,26 @@ final class RecoverStaleStepsCommand extends BaseCommand
             return;
         }
 
+        // A populated child block proves the parent completed its compute()
+        // orchestration. Such parents remain Running by design until the
+        // dispatcher settles their tree; recovery must never rerun them,
+        // regardless of whether their descendants are active or terminal.
+        // Resolve all populated blocks in one query so watchdog cost is
+        // constant instead of one descendant walk per stale parent.
+        $childBlockUuids = $staleSteps
+            ->pluck('child_block_uuid')
+            ->filter()
+            ->unique()
+            ->values();
+
+        $populatedChildBlocks = $childBlockUuids->isEmpty()
+            ? collect()
+            : Step::query()
+                ->whereIn('block_uuid', $childBlockUuids)
+                ->distinct()
+                ->pluck('block_uuid')
+                ->flip();
+
         $recovered = 0;
 
         foreach ($staleSteps as $step) {
@@ -117,14 +137,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 continue;
             }
 
-            // Parent steps stay in Running until every descendant reaches a
-            // terminal state — that is the state machine's design, not a
-            // zombie condition. Reclaiming such a parent causes its compute()
-            // to rerun and duplicate-dispatch the child block (including any
-            // DB rows created by child jobs). Skip parents whose tree is
-            // still in-flight; recover them only if every descendant is
-            // terminal (genuine zombie: parent stuck, tree already settled).
-            if ($step->isParent() && $this->hasActiveDescendants($step)) {
+            if ($step->isParent() && $populatedChildBlocks->has($step->child_block_uuid)) {
                 continue;
             }
 
@@ -221,43 +234,6 @@ final class RecoverStaleStepsCommand extends BaseCommand
         } catch (ReflectionException) {
             return $fallback;
         }
-    }
-
-    /**
-     * Walk the parent's child_block_uuid and any nested parent blocks. Returns
-     * true if any descendant is not in a terminal state (Completed, Skipped,
-     * Cancelled, Failed, Stopped). Zero children anywhere → returns false,
-     * which correctly flags a never-dispatched parent as recoverable.
-     *
-     * Level-wise walk: one query per tree level to collect the block set
-     * (visited-guarded — nothing prevents a child_block_uuid cycle), then
-     * a single non-terminal existence check across all collected blocks.
-     * The previous per-child recursion cost one query per node.
-     */
-    private function hasActiveDescendants(Step $parent): bool
-    {
-        $visited = [$parent->child_block_uuid => true];
-        $queue = [$parent->child_block_uuid];
-
-        while (! empty($queue)) {
-            $childBlocks = Step::whereIn('block_uuid', $queue)
-                ->whereNotNull('child_block_uuid')
-                ->pluck('child_block_uuid')
-                ->unique();
-
-            $queue = [];
-
-            foreach ($childBlocks as $childBlock) {
-                if (! isset($visited[$childBlock])) {
-                    $visited[$childBlock] = true;
-                    $queue[] = $childBlock;
-                }
-            }
-        }
-
-        return Step::whereIn('block_uuid', array_keys($visited))
-            ->whereNotIn('state', Step::terminalStepStates())
-            ->exists();
     }
 
     // ========================================================================

@@ -84,3 +84,24 @@ it('assigns a workflow_id when none is provided', function (): void {
 
     expect($step->workflow_id)->not->toBeNull();
 });
+
+it('preserves an explicitly-set valid queue on a high-priority step', function (): void {
+    config()->set('step-dispatcher.queues.valid', ['ares']);
+
+    $step = Step::create([
+        'class' => 'App\\EchoJob', 'type' => 'default',
+        'block_uuid' => 'pq-'.uniqid(), 'priority' => 'high', 'queue' => 'ares', 'state' => Pending::class,
+    ]);
+
+    expect($step->queue)->toBe('ares')
+        ->and($step->priority)->toBe('high');
+});
+
+it('routes a high-priority step with an invalid queue to the priority lane, not default', function (): void {
+    $step = Step::create([
+        'class' => 'App\\EchoJob', 'type' => 'default',
+        'block_uuid' => 'pq-'.uniqid(), 'priority' => 'high', 'queue' => 'not-a-real-queue', 'state' => Pending::class,
+    ]);
+
+    expect($step->queue)->toBe('priority');
+});

@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.19.0 - 2026-07-20
+
+### Reliability and scale
+
+- Populated stale parent workflows are never replayed; empty child blocks remain recoverable.
+- Failure and child-cascade scans now query only actionable rows, keeping dispatcher cost bounded as history grows.
+- High-priority steps preserve valid explicit queues while invalid or absent queues still route to the priority lane.
+- Added recovery-safety, rerun, queue-routing, and hot-path query-budget coverage.
+
 ## 1.18.0 - 2026-07-14
 
 ### Added

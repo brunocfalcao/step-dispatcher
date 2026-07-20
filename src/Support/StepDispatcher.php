@@ -615,18 +615,32 @@ final class StepDispatcher
     public static function cascadeCancelledSteps(?string $group = null): bool
     {
         $cancellationsOccurred = false;
+        $stepsTable = Step::tableName();
+        $settledSuccessorStates = array_merge(Step::terminalStepStates(), [NotRunnable::class]);
 
-        // Find all failed/stopped/cancelled steps that should trigger
-        // downstream cancellation. Cancelled is included because consumers
-        // cancel in-flight steps externally (direct state write, bypassing
-        // the state machine — e.g. Kraite's RecoverPositionsCommand);
-        // Cancelled is terminal but not "concluded", so successors at
-        // higher indexes would otherwise sit Pending forever and wedge
-        // the block.
+        // Select only failures that currently have an actionable successor.
+        // Terminal history is permanent until archive, so loading every old
+        // failure and issuing one empty successor query per row made each
+        // dispatcher tick grow with table history rather than live work.
         $failedSteps = Step::whereIn('state', array_merge(Step::failedStepStates(), [Cancelled::class]))
             ->forGroup($group)
             ->whereNotNull('index')
-            ->get();
+            ->whereExists(static function ($query) use ($group, $settledSuccessorStates, $stepsTable): void {
+                $query
+                    ->selectRaw('1')
+                    ->from($stepsTable.' as actionable_successors')
+                    ->whereColumn('actionable_successors.block_uuid', $stepsTable.'.block_uuid')
+                    ->whereColumn('actionable_successors.index', '>', $stepsTable.'.index')
+                    ->whereNotIn('actionable_successors.state', $settledSuccessorStates)
+                    ->where('actionable_successors.type', 'default');
+
+                if ($group === null) {
+                    $query->whereNull('actionable_successors.group');
+                } else {
+                    $query->where('actionable_successors.group', $group);
+                }
+            })
+            ->get(['block_uuid', 'index']);
 
         if ($failedSteps->isEmpty()) {
             return false;
@@ -755,11 +769,29 @@ final class StepDispatcher
      */
     public static function cascadeCancellationToChildren(?string $group = null): bool
     {
-        // Also include Cancelled - a cancelled parent must also cancel its children recursively
+        $stepsTable = Step::tableName();
+
+        // Also include Cancelled - a cancelled parent must also cancel its children recursively.
+        // Restrict the parent scan to child blocks that still contain live
+        // work; settled terminal parents otherwise produce one empty child
+        // query on every dispatcher tick until archive.
         $failedOrStoppedParents = Step::whereIn('state', [Failed::class, Stopped::class, Cancelled::class])
             ->forGroup($group)
             ->whereNotNull('child_block_uuid')
-            ->get();
+            ->whereExists(static function ($query) use ($group, $stepsTable): void {
+                $query
+                    ->selectRaw('1')
+                    ->from($stepsTable.' as actionable_children')
+                    ->whereColumn('actionable_children.block_uuid', $stepsTable.'.child_block_uuid')
+                    ->whereNotIn('actionable_children.state', Step::terminalStepStates());
+
+                if ($group === null) {
+                    $query->whereNull('actionable_children.group');
+                } else {
+                    $query->where('actionable_children.group', $group);
+                }
+            })
+            ->get(['child_block_uuid']);
 
         if ($failedOrStoppedParents->isEmpty()) {
             return false;

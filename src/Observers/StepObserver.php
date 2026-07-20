@@ -137,30 +137,22 @@ final class StepObserver
             }
         }
 
-        // Automatically route high priority steps to the priority queue —
-        // at CREATION time only. After creation the queue column is owned
-        // by the dispatch-time queue resolver (StepRouter composes the
-        // physical `{hostname}-priority` name since the v1.53.0 naming
-        // flip). Rewriting on every save clobbered the resolved physical
-        // queue back to the logical `priority` name — which no Horizon
-        // supervisor subscribes to anymore — right before the Redis push,
-        // stranding every priority='high' workflow (position closes,
-        // order corrections, recover-stale promotions) on a dead queue.
-        // Caught 2026-06-05 during the first live trading smoke test.
-        if (! $step->exists && $step->priority === 'high') {
-            $step->queue = 'priority';
-        }
-
-        // Queue validation: fallback to 'default' if queue is not valid or
-        // empty — at CREATION time only, same ownership rule as the
-        // priority auto-route above. After creation the queue column is
-        // owned by the dispatch-time queue resolver, which composes
-        // physical "{hostname}-{logical}" names (eos-positions,
+        // Queue normalisation — at CREATION time only. After creation the
+        // queue column is owned by the dispatch-time queue resolver, which
+        // composes physical "{hostname}-{logical}" names (eos-positions,
         // tyche-priority) from a dynamic host pool that queues.valid can
-        // never enumerate. Validating on every save reset those resolved
-        // names to 'default' on the resolver's own persist inside
-        // dispatchSingleStep — silently defeating IP-affinity routing.
-        // Valid queues: from config, plus 'default', 'priority', and hostname-based queue
+        // never enumerate; validating on every save reset those resolved
+        // names and stranded high-priority workflows on dead queues
+        // (2026-06-05, first live trading smoke test).
+        //
+        // Rule: an explicitly-set VALID queue always wins — targeted
+        // per-hostname queues (e.g. registration connectivity probes,
+        // one per server by design) must survive priority routing
+        // (2026-07-20: the unconditional high-priority rewrite clobbered
+        // per-server fan-out queues to the shared priority lane,
+        // collapsing the one-probe-per-server guarantee). Only an empty
+        // or invalid queue is rewritten: priority='high' steps default
+        // to the priority lane, everything else to 'default'.
         if (! $step->exists) {
             $validQueues = array_merge(
                 [
@@ -173,7 +165,7 @@ final class StepObserver
             );
 
             if (empty($step->queue) || ! in_array($step->queue, $validQueues, strict: true)) {
-                $step->queue = 'default';
+                $step->queue = $step->priority === 'high' ? 'priority' : 'default';
             }
         }
 

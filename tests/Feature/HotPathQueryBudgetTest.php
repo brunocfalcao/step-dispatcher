@@ -6,6 +6,7 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Completed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
@@ -78,10 +79,11 @@ it('creates a child step with at most 2 inheritance lookups plus the insert', fu
     expect($queries)->toBeLessThanOrEqual(3);
 });
 
-it('walks a deep stale-parent tree with queries bounded by depth, not node count', function (): void {
-    // Stale Running parent with a 2-level descendant tree fanning out to
-    // many leaves. Per-child recursion costs O(nodes); the level walk
-    // costs O(depth) + 1 terminality check.
+it('protects a populated stale-parent tree with a constant query budget', function (): void {
+    // A populated child block proves compute() completed its orchestration
+    // responsibility. Recovery must not inspect terminality or tree depth:
+    // active descendants remain in-flight, while terminal descendants are
+    // settled by the dispatcher's parent-resolution phases.
     $rootChildBlock = (string) Str::uuid();
 
     $root = Step::create([
@@ -123,12 +125,12 @@ it('walks a deep stale-parent tree with queries bounded by depth, not node count
         }
     }
 
-    // Every descendant terminal: the walk must visit the WHOLE tree
-    // before concluding the root is a genuine zombie. (Any non-terminal
-    // child short-circuits the walk and hides the per-node cost.)
+    // Every descendant terminal is the production race: recovery used to
+    // classify the parent as a zombie and rerun compute() before the next
+    // dispatcher tick could settle it.
     DB::table(Step::tableName())
         ->where('id', '!=', $root->id)
-        ->update(['state' => \StepDispatcher\States\Completed::class]);
+        ->update(['state' => Completed::class]);
 
     DB::table(Step::tableName())->where('id', $root->id)->update([
         'state' => Running::class,
@@ -139,8 +141,7 @@ it('walks a deep stale-parent tree with queries bounded by depth, not node count
         Artisan::call('steps:recover-stale');
     });
 
-    // Stale scan + level walk (2 levels) + 1 terminality check + the
-    // recovery writes. Pre-fix the walk alone cost one query per
-    // level-1 parent (10+) on top of that.
-    expect($queries)->toBeLessThanOrEqual(12);
+    expect($queries)->toBeLessThanOrEqual(4)
+        ->and($root->fresh()->state)->toBeInstanceOf(Running::class)
+        ->and((int) $root->fresh()->retries)->toBe(0);
 });

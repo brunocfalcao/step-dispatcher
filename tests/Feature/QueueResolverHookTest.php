@@ -276,7 +276,12 @@ describe('Resolver override vs priority=high auto-routing (regression 2026-06-05
             ->and($step->priority)->toBe('high');
     });
 
-    it('still auto-routes priority=high steps to the logical priority queue at creation', function (): void {
+    it('preserves an explicitly-set valid queue on priority=high steps at creation', function (): void {
+        // Contract changed 2026-07-20: the unconditional high->priority
+        // queue rewrite clobbered targeted per-hostname fan-out queues
+        // (registration connectivity probes — one per server by design).
+        // An explicit VALID queue now always wins; only empty/invalid
+        // queues are rewritten (high -> 'priority', else 'default').
         config()->set('step-dispatcher.queues.valid', ['default', 'priority', 'positions']);
 
         $step = Step::create([
@@ -290,6 +295,7 @@ describe('Resolver override vs priority=high auto-routing (regression 2026-06-05
             'state' => Pending::class,
         ]);
 
-        expect($step->queue)->toBe('priority');
+        expect($step->queue)->toBe('positions')
+            ->and($step->priority)->toBe('high');
     });
 });
