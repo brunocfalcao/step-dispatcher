@@ -571,7 +571,7 @@ return [
         // If a single tick takes longer than this, fire the closure below.
         // Useful for slow-tick alerts.
         'warning_threshold_ms' => 40000,
-        'on_slow_dispatch' => fn (int $ms) => Log::warning("Slow dispatcher tick: {$ms}ms"),
+        'on_slow_dispatch' => null,
     ],
 
     'flag_path' => env('STEP_DISPATCHER_FLAG_PATH'),
@@ -588,6 +588,15 @@ return [
         'path'    => env('STEP_DISPATCHER_LOGGING_PATH', storage_path('logs')),
     ],
 ];
+```
+
+Register a runtime slow-dispatch callback from a service provider instead of
+placing a closure in configuration:
+
+```php
+StepsDispatcher::onSlowDispatch(
+    fn (int $ms) => Log::warning("Slow dispatcher tick: {$ms}ms"),
+);
 ```
 
 ---

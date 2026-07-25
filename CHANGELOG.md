@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.1 - 2026-07-25
+
+### Production configuration caching
+
+- Slow-dispatch callbacks can now be registered at runtime through
+  `StepsDispatcher::onSlowDispatch()`, keeping closures out of Laravel's
+  serializable configuration cache.
+- The existing configuration callback remains supported as a fallback.
+- Slow-tick callback coverage passes: 3 tests / 4 assertions.
+
 ## 1.20.0 - 2026-07-25
 
 ### Priority and recovery reliability

@@ -28,6 +28,7 @@ afterEach(function (): void {
     // Restore "record everything" (the default-null behaviour) so the
     // static recorder does not leak a discard rule into other test files.
     StepsDispatcher::recordTickWhen(fn () => true);
+    StepsDispatcher::onSlowDispatch(null);
 });
 
 it('discards a tick when the recordTickWhen callable returns false', function (): void {
@@ -50,7 +51,7 @@ it('invokes the slow-dispatch callback when a tick exceeds the threshold', funct
     $observed = null;
 
     config()->set('step-dispatcher.dispatch.warning_threshold_ms', 0);
-    config()->set('step-dispatcher.dispatch.on_slow_dispatch', function (int $ms) use (&$observed): void {
+    StepsDispatcher::onSlowDispatch(function (int $ms) use (&$observed): void {
         $observed = $ms;
     });
     StepsDispatcher::recordTickWhen(fn () => true);

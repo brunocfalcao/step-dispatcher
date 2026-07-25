@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Abstracts\BaseModel;
 use StepDispatcher\Support\RuntimeContext;
+use StepDispatcher\Support\Timing;
 
 final class StepsDispatcher extends BaseModel
 {
@@ -21,6 +22,8 @@ final class StepsDispatcher extends BaseModel
      * @var callable|null
      */
     protected static ?Closure $recordTickWhenCallable = null;
+
+    protected static ?Closure $slowDispatchCallable = null;
 
     protected $casts = [
         'can_dispatch' => 'boolean',
@@ -69,6 +72,22 @@ final class StepsDispatcher extends BaseModel
     public static function getRecordTickWhenCallable(): ?Closure
     {
         return self::$recordTickWhenCallable;
+    }
+
+    /**
+     * Register a runtime-only callback for diagnostically slow dispatches.
+     *
+     * Keeping this callback outside Laravel's configuration repository allows
+     * applications to cache their configuration safely.
+     */
+    public static function onSlowDispatch(?Closure $callable): void
+    {
+        self::$slowDispatchCallable = $callable;
+    }
+
+    public static function getSlowDispatchCallable(): ?Closure
+    {
+        return self::$slowDispatchCallable;
     }
 
     /**
@@ -225,7 +244,7 @@ final class StepsDispatcher extends BaseModel
                 $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
                 $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
                 $durationMs = $startedAtFloat
-                    ? \StepDispatcher\Support\Timing::elapsedMs((float) $startedAtFloat)
+                    ? Timing::elapsedMs((float) $startedAtFloat)
                     : 0;
 
                 $tick->progress = $progress;
@@ -241,7 +260,8 @@ final class StepsDispatcher extends BaseModel
 
                     if ($durationMs > 0) {
                         $warningThreshold = config('step-dispatcher.dispatch.warning_threshold_ms', 40000);
-                        $onSlowDispatch = config('step-dispatcher.dispatch.on_slow_dispatch');
+                        $onSlowDispatch = self::$slowDispatchCallable
+                            ?? config('step-dispatcher.dispatch.on_slow_dispatch');
 
                         if ($durationMs > $warningThreshold && is_callable($onSlowDispatch)) {
                             $onSlowDispatch($durationMs);
