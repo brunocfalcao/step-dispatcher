@@ -130,6 +130,22 @@ final class StepDispatcher
     }
 
     /**
+     * Named dispatcher groups that currently own active work.
+     *
+     * @return list<string>
+     */
+    public static function activeGroups(): array
+    {
+        return Step::query()
+            ->whereIn('state', [Pending::class, Dispatched::class, Running::class])
+            ->whereNotNull('group')
+            ->distinct()
+            ->pluck('group')
+            ->values()
+            ->all();
+    }
+
+    /**
      * Activate the dispatcher by creating the flag file.
      * Called when new steps are created.
      */
@@ -196,7 +212,12 @@ final class StepDispatcher
         $progress = 0;
 
         try {
-            // Marks as skipped all children steps on a skipped step.
+            // Money-critical workflows must not wait behind a large cleanup
+            // backlog. Dispatch every currently-runnable priority step first,
+            // then retain the established one-cleanup-phase-per-tick pacing
+            // for nested workflow state transitions.
+            $priorityDispatched = self::dispatchPrioritySteps($group);
+
             $result = self::skipAllChildStepsOnParentAndChildSingleStep($group);
             if ($result) {
                 return;
@@ -250,76 +271,36 @@ final class StepDispatcher
 
             $progress = 7;
 
-            // Distribute the steps to be dispatched (only if no cancellations or failures happened)
+            if ($priorityDispatched > 0) {
+                return;
+            }
+
+            // Distribute the steps to be dispatched.
             $dispatchedSteps = collect();
 
-            // Two-pass selection so that priority='high' steps are never
-            // hidden behind a non-priority backlog that fills the
-            // max_per_tick window:
-            //
-            //   Pass 1 — fetch ALL priority='high' Pending steps. No cap.
-            //     Priority is the framework's escape hatch for
-            //     latency-sensitive workflows (observer-dispatched
-            //     corrections, position closes, WAP). They must always
-            //     be visible to the dispatcher regardless of how many
-            //     non-priority rows sit in front of them in FIFO order.
-            //     Production trigger: 2026-05-01, a 1700-row hourly
-            //     leverage-bracket batch buried an observer-dispatched
-            //     PrepareOrderCorrectionJob for ~8 minutes — the step
-            //     was Pending the whole time, never reaching the
-            //     dispatcher's 100-row visible window.
-            //
-            //   Pass 2 — only when no priority work exists, fetch up to
-            //     max_per_tick non-priority Pending steps. The cap still
-            //     protects the dispatcher from runaway non-priority
-            //     groups (the 2026-04-25 wedge).
-            //
-            // Trade-off: if a priority flood ever materialises (5,000+
-            // priority='high' rows in one tick), the cap can be defeated.
-            // In practice priority='high' is reserved for individual
-            // observer-dispatched workflow steps — not bulk batches.
-            // If that assumption ever breaks, add a separate
-            // priority_max_per_tick knob.
-
-            $baseQuery = static fn () => Step::pending()
+            // Priority work was already handled before cleanup. Exclude any
+            // remaining non-runnable priority poison pills here so they cannot
+            // hide the bounded non-priority FIFO.
+            $pendingQuery = Step::pending()
                 ->forGroup($group)
                 ->where(static function ($q) {
                     $q->whereNull('dispatch_after')
                         ->orWhere('dispatch_after', '<=', now());
                 })
+                ->where(static function ($query): void {
+                    $query->whereNull('priority')
+                        ->orWhere('priority', '!=', 'high');
+                })
                 ->orderBy('id', 'asc');
 
-            $prioritySteps = $baseQuery()
-                ->where('priority', 'high')
-                ->get();
+            $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
+            if ($maxPerTick > 0) {
+                $pendingQuery->limit($maxPerTick);
+            }
 
-            $pendingSteps = $prioritySteps;
+            $pendingSteps = $pendingQuery->get();
             $stepsCache = self::buildStepsCache($pendingSteps, $group);
             $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
-
-            // Pass 1 fall-through: when priority='high' rows exist but NONE
-            // of them are actually dispatchable this tick (e.g. an orphan
-            // priority step whose previous index is missing — a poison
-            // pill), the original implementation skipped pass 2 entirely
-            // and the entire group's non-priority backlog starved.
-            // Production trigger (2026-05-07, group eta): one undispatchable
-            // priority='high' step wedged 660+ Pending rows for 11+ minutes
-            // before the group-stall watchdog fired.
-            //
-            // Contract: pass 2 must run whenever pass 1 produces zero
-            // *dispatchable* work — not only when pass 1 fetches zero rows.
-            if ($prioritySteps->isEmpty() || $dispatchableSteps->isEmpty()) {
-                $pendingQuery = $baseQuery();
-
-                $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
-                if ($maxPerTick > 0) {
-                    $pendingQuery->limit($maxPerTick);
-                }
-
-                $pendingSteps = $pendingQuery->get();
-                $stepsCache = self::buildStepsCache($pendingSteps, $group);
-                $dispatchableSteps = self::computeDispatchableSteps($pendingSteps, $stepsCache);
-            }
 
             // Apply transitions for all dispatchable steps. apply() is an
             // atomic claim (UPDATE ... WHERE state = Pending) — a null
@@ -394,6 +375,45 @@ final class StepDispatcher
                 self::deactivate();
             }
         }
+    }
+
+    /**
+     * Dispatch runnable priority work before cleanup gets an opportunity to
+     * end the tick. Returns the number of successfully claimed steps.
+     */
+    private static function dispatchPrioritySteps(?string $group): int
+    {
+        $prioritySteps = Step::pending()
+            ->forGroup($group)
+            ->where('priority', 'high')
+            ->where(static function ($query): void {
+                $query->whereNull('dispatch_after')
+                    ->orWhere('dispatch_after', '<=', now());
+            })
+            ->orderBy('id')
+            ->get();
+
+        if ($prioritySteps->isEmpty()) {
+            return 0;
+        }
+
+        $stepsCache = self::buildStepsCache($prioritySteps, $group);
+        $dispatchableSteps = self::computeDispatchableSteps($prioritySteps, $stepsCache);
+        $claimedSteps = collect();
+
+        $dispatchableSteps->each(static function (Step $step) use ($claimedSteps, $stepsCache): void {
+            $transition = new PendingToDispatched($step, $stepsCache);
+
+            if ($transition->apply() !== null) {
+                $claimedSteps->push($step);
+            }
+        });
+
+        $claimedSteps->each(static function (Step $step): void {
+            (new self)->dispatchSingleStep($step);
+        });
+
+        return $claimedSteps->count();
     }
 
     /**

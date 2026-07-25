@@ -28,8 +28,8 @@ use StepDispatcher\Support\BaseCommand;
  *
  * Opt-in behaviours (flags):
  *   --recover-dispatched : scan Dispatched steps stuck past --step-threshold
- *                          seconds and promote them to priority/high so a
- *                          free worker grabs them next tick.
+ *                          seconds, raise their dispatcher priority, and
+ *                          requeue them on their original worker lane.
  *   --release-locks      : force-unlock steps_dispatcher rows held by a dead
  *                          tick for longer than --lock-threshold seconds.
  *
@@ -55,7 +55,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
     private const DEFAULT_MAX_RETRIES = 2;
 
     protected $signature = 'steps:recover-stale
-                            {--recover-dispatched : Also promote stuck Dispatched steps to priority/high}
+                            {--recover-dispatched : Also requeue stuck Dispatched steps at high priority on their original queue}
                             {--release-locks : Also release dispatcher locks held beyond the threshold}
                             {--watchdog-progress : Also alert on groups that have Pending steps but no recent terminal-state progress}
                             {--step-threshold=300 : Seconds in Dispatched before a step counts as stuck}
@@ -244,41 +244,50 @@ final class RecoverStaleStepsCommand extends BaseCommand
     {
         $staleThreshold = now()->subSeconds($thresholdSeconds);
 
-        $baseQuery = Step::query()
+        // Pin the candidate IDs before changing priority. Eloquent's bulk
+        // update refreshes updated_at; reusing the stale-time query afterward
+        // would therefore select zero rows and postpone the actual requeue
+        // until a later watchdog pass.
+        $staleIds = Step::query()
             ->where('state', Dispatched::class)
-            ->where('updated_at', '<', $staleThreshold);
-
-        $count = (clone $baseQuery)->count();
+            ->where('updated_at', '<', $staleThreshold)
+            ->pluck('id');
+        $count = $staleIds->count();
 
         if ($count === 0) {
             return;
         }
 
-        $alreadyPromoted = (clone $baseQuery)
-            ->where('queue', 'priority')
-            ->where('priority', 'high')
+        // Dispatched -> Pending increments retries. That gives recovery a
+        // durable marker without rewriting the worker lane. Priority alone
+        // cannot identify an earlier recovery because many jobs are born
+        // high-priority.
+        $alreadyRecovered = Step::query()
+            ->whereIn('id', $staleIds)
+            ->where('retries', '>', 0)
             ->count();
 
-        $oldestStep = (clone $baseQuery)
+        $oldestStep = Step::query()
+            ->whereIn('id', $staleIds)
             ->orderBy('updated_at', 'asc')
             ->first();
 
-        // CRITICAL path: every stuck step was already promoted to priority/high
-        // on a previous run and is still Dispatched. Promotion by itself isn't
-        // enough — the Redis payload is gone (worker died between pop and state
-        // transition) so the queue-column rename achieves nothing. Alert the
-        // operator AND flip state back to Pending so the next dispatcher tick
-        // re-pushes them to the priority queue with a fresh payload.
-        if ($alreadyPromoted > 0 && $alreadyPromoted === $count) {
-            $requeued = $this->requeueDispatchedSteps($baseQuery);
+        // CRITICAL path: every stuck step has already consumed at least one
+        // retry and is Dispatched again. Alert the operator AND flip state back
+        // to Pending so the next dispatcher tick re-pushes each step to its
+        // original queue.
+        if ($alreadyRecovered === $count) {
+            $requeued = $this->requeueDispatchedSteps(
+                Step::query()->whereIn('id', $staleIds),
+            );
 
-            $this->verboseError("CRITICAL: {$alreadyPromoted} priority step(s) still stuck after promotion; re-queued {$requeued}.");
+            $this->verboseError("CRITICAL: {$alreadyRecovered} step(s) still stuck after recovery; re-queued {$requeued}.");
 
             StaleStepsDetected::dispatch(
                 severity: 'critical',
                 reason: 'stale_dispatched_steps_still_stuck',
                 count: $count,
-                alreadyPromotedCount: $alreadyPromoted,
+                alreadyPromotedCount: $alreadyRecovered,
                 oldestStep: $oldestStep,
                 context: [
                     'step_threshold_seconds' => $thresholdSeconds,
@@ -290,30 +299,29 @@ final class RecoverStaleStepsCommand extends BaseCommand
             return;
         }
 
-        $promoted = (clone $baseQuery)
+        $promoted = Step::query()
+            ->whereIn('id', $staleIds)
             ->where(static function ($q): void {
-                $q->where('queue', '!=', 'priority')
+                $q->whereNull('priority')
                     ->orWhere('priority', '!=', 'high');
             })
             ->update([
                 'priority' => 'high',
-                'queue' => 'priority',
             ]);
 
-        // After promotion, transition state back to Pending on every stale
-        // Dispatched step (both newly-promoted and already-promoted). Without
-        // this, promotion is just a queue-column rename — step-dispatcher never
-        // re-pushes a step whose state is still Dispatched, so the priority
-        // queue stays empty and workers sit idle.
-        $requeued = $this->requeueDispatchedSteps($baseQuery);
+        // Transition every pinned candidate back to Pending, including rows
+        // whose updated_at changed during the priority update above.
+        $requeued = $this->requeueDispatchedSteps(
+            Step::query()->whereIn('id', $staleIds),
+        );
 
-        $this->verboseInfo("Promoted {$promoted} stale Dispatched step(s) to priority/high; re-queued {$requeued}.");
+        $this->verboseInfo("Raised {$promoted} stale Dispatched step(s) to high priority on their original queues; re-queued {$requeued}.");
 
         StaleStepsDetected::dispatch(
             severity: 'warning',
             reason: 'stale_dispatched_steps_promoted',
             count: $count,
-            alreadyPromotedCount: $alreadyPromoted,
+            alreadyPromotedCount: $alreadyRecovered,
             promotedCount: $promoted,
             oldestStep: $oldestStep,
             context: [

@@ -16,7 +16,7 @@ use StepDispatcher\Models\Step;
  *
  * Severity:
  *   - 'warning':  stall was detected and self-healed in-band (dispatched steps
- *                 promoted, or wedged locks released).
+ *                 requeued at high priority, or wedged locks released).
  *   - 'critical': self-healing already ran in a previous cycle and the stall
  *                 is still present — human attention likely needed.
  *
@@ -26,10 +26,12 @@ use StepDispatcher\Models\Step;
  *
  *   - 'stale_running_steps_recovered'       — zombie Running step flipped back
  *                                              to Pending or failed.
- *   - 'stale_dispatched_steps_promoted'     — stuck Dispatched step(s) pushed
- *                                              to priority queue.
- *   - 'stale_dispatched_steps_still_stuck'  — promotion already happened and
- *                                              the step(s) remain Dispatched.
+ *   - 'stale_dispatched_steps_promoted'     — stuck Dispatched step(s) requeued
+ *                                              at high priority on their
+ *                                              original queues.
+ *   - 'stale_dispatched_steps_still_stuck'  — recovery already happened and
+ *                                              the step(s) are Dispatched
+ *                                              again.
  *   - 'stale_dispatcher_locks_released'     — one or more group locks were
  *                                              force-unlocked.
  */

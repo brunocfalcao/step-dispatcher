@@ -4,9 +4,12 @@ declare(strict_types=1);
 
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
+use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Dispatched;
+use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 
 beforeEach(function () {
@@ -93,5 +96,77 @@ it('does not clobber a step that races to Running between fetch and transition',
     expect($dbState)->toBe(
         Running::class,
         'concurrent Running state must not be clobbered back to Pending by recover-stale'
+    );
+});
+
+it('requeues stale dispatched work on its original worker lane', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    $step = Step::create([
+        'class' => 'App\\Jobs\\TestJob',
+        'type' => 'default',
+        'queue' => 'positions',
+        'priority' => 'default',
+        'group' => 'test-group',
+        'index' => 1,
+        'block_uuid' => (string) Str::uuid(),
+    ]);
+
+    Step::withoutEvents(function () use ($step): void {
+        DB::table('steps')->where('id', $step->id)->update([
+            'state' => Dispatched::class,
+            'updated_at' => now()->subMinutes(10),
+        ]);
+    });
+
+    Artisan::call('steps:recover-stale', [
+        '--recover-dispatched' => true,
+        '--step-threshold' => 0,
+    ]);
+
+    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
+        ->and($step->fresh()->queue)->toBe('positions')
+        ->and($step->fresh()->priority)->toBe('high');
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'warning'
+            && $event->reason === 'stale_dispatched_steps_promoted',
+    );
+});
+
+it('escalates a dispatched step that becomes stale again after recovery', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    $step = Step::create([
+        'class' => 'App\\Jobs\\TestJob',
+        'type' => 'default',
+        'queue' => 'positions',
+        'priority' => 'high',
+        'group' => 'test-group',
+        'index' => 1,
+        'block_uuid' => (string) Str::uuid(),
+        'retries' => 1,
+    ]);
+
+    Step::withoutEvents(function () use ($step): void {
+        DB::table('steps')->where('id', $step->id)->update([
+            'state' => Dispatched::class,
+            'updated_at' => now()->subMinutes(10),
+        ]);
+    });
+
+    Artisan::call('steps:recover-stale', [
+        '--recover-dispatched' => true,
+        '--step-threshold' => 0,
+    ]);
+
+    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
+        ->and($step->fresh()->queue)->toBe('positions');
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'critical'
+            && $event->reason === 'stale_dispatched_steps_still_stuck',
     );
 });

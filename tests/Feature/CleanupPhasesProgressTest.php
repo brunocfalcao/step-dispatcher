@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Cancelled;
@@ -11,6 +12,7 @@ use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\StepDispatcher;
+use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
 
 beforeEach(function () {
     config()->set('step-dispatcher.flag_path', sys_get_temp_dir());
@@ -198,4 +200,51 @@ it('batchTransitionSteps returns the count of transitions that actually happened
     expect($count)->toBe(1)
         ->and($movable->fresh()->state)->toBeInstanceOf(Skipped::class)
         ->and($immovable->fresh()->state)->toBeInstanceOf(Completed::class);
+});
+
+it('does not starve dispatchable priority work while cleanup advances another workflow', function () {
+    Queue::fake();
+
+    $childBlock = (string) Str::uuid();
+    $parent = seedCleanupStep(['child_block_uuid' => $childBlock]);
+    forceCleanupState($parent, Skipped::class);
+
+    $cleanupChild = seedCleanupStep(['block_uuid' => $childBlock]);
+    forceCleanupState($cleanupChild, Dispatched::class);
+
+    $priorityStep = seedCleanupStep([
+        'class' => PrefixCarryingTestJob::class,
+        'index' => null,
+        'priority' => 'high',
+        'queue' => 'priority',
+    ]);
+
+    StepDispatcher::dispatch('cleanup-test');
+
+    expect($cleanupChild->fresh()->state)->toBeInstanceOf(Skipped::class)
+        ->and($priorityStep->fresh()->state)->toBeInstanceOf(Dispatched::class);
+});
+
+it('does not dispatch priority work whose failed predecessor still requires cleanup', function () {
+    Queue::fake();
+
+    $block = (string) Str::uuid();
+    $failedPredecessor = seedCleanupStep([
+        'block_uuid' => $block,
+        'index' => 1,
+    ]);
+    forceCleanupState($failedPredecessor, Failed::class);
+
+    $prioritySuccessor = seedCleanupStep([
+        'class' => PrefixCarryingTestJob::class,
+        'block_uuid' => $block,
+        'index' => 2,
+        'priority' => 'high',
+        'queue' => 'priority',
+    ]);
+
+    StepDispatcher::dispatch('cleanup-test');
+
+    expect($prioritySuccessor->fresh()->state)->toBeInstanceOf(Cancelled::class);
+    Queue::assertNothingPushed();
 });

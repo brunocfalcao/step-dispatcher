@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Completed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\Support\StepDispatcher;
 
@@ -75,4 +76,25 @@ it('caps the number of Pending steps promoted per tick at max_per_tick', functio
         3,
         'Steps beyond the per-tick cap must remain Pending, picked up on subsequent ticks in waves.'
     );
+});
+
+it('lists only groups that currently own active work', function () {
+    foreach ([
+        ['group' => 'alpha', 'state' => Pending::class],
+        ['group' => 'beta', 'state' => Completed::class],
+        ['group' => 'gamma', 'state' => Pending::class],
+    ] as $row) {
+        Step::create([
+            'class' => 'App\\Jobs\\TestJob',
+            'type' => 'default',
+            'queue' => 'default',
+            'group' => $row['group'],
+            'index' => null,
+            'block_uuid' => (string) Str::uuid(),
+            'state' => $row['state'],
+        ]);
+    }
+
+    expect(StepDispatcher::activeGroups())
+        ->toEqualCanonicalizing(['alpha', 'gamma']);
 });

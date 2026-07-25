@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.0 - 2026-07-25
+
+### Priority and recovery reliability
+
+- Runnable high-priority work is dispatched before cleanup can end a tick.
+- Active groups can be queried directly, allowing consumers to avoid empty
+  ticks and isolate one group's exception from the rest.
+- Stale Dispatched steps are pinned before updates, requeued at high priority
+  on their original worker lane, and escalate after a repeated stall.
+- Feature suite passes: 214 tests / 538 assertions.
+
 ## 1.19.0 - 2026-07-20
 
 ### Reliability and scale
