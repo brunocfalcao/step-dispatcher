@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.2 - 2026-08-01
+
+### Laravel 13 and Pest 5 verification
+
+- Laravel 13 remains a supported runtime and is now the package's active
+  Testbench verification target.
+- Local tests use Pest 5 TIA with a fresh graph for release gates and filtered
+  impact selection during development. Production runtime dependencies are
+  unchanged.
+
 ## 1.20.1 - 2026-07-25
 
 ### Production configuration caching

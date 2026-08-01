@@ -5,6 +5,11 @@ declare(strict_types=1);
 use StepDispatcher\Support\RuntimeContext;
 use StepDispatcher\Tests\TestCase;
 
+pest()->tia()
+    ->always()
+    ->locally()
+    ->filtered();
+
 uses(TestCase::class)->in('Feature', 'Unit');
 
 // Wipe the RuntimeContext prefix stack between tests. A test that
