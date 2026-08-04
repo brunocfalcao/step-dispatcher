@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
+use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Pending;
@@ -103,4 +105,24 @@ it('recovers a stale parent when its elected child block is empty', function ():
     expect(Step::where('block_uuid', $childBlockUuid)->exists())->toBeFalse()
         ->and($parent->fresh()->state)->toBeInstanceOf(Pending::class)
         ->and((int) $parent->fresh()->retries)->toBe(1);
+});
+
+it('reports the oldest step that was actually recovered', function (): void {
+    Event::fake([StaleStepsDetected::class]);
+
+    $childBlockUuid = 'settled-child-'.Str::uuid();
+    $protectedParent = makeParentRecoveryStep($childBlockUuid);
+    makeParentRecoveryChild($childBlockUuid, Completed::class);
+    $recoveredLeaf = makeParentRecoveryStep(null);
+
+    Artisan::call('steps:recover-stale');
+
+    expect($protectedParent->fresh()->state)->toBeInstanceOf(Running::class)
+        ->and($recoveredLeaf->fresh()->state)->toBeInstanceOf(Pending::class);
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->reason === 'stale_running_steps_recovered'
+            && $event->oldestStep?->is($recoveredLeaf) === true,
+    );
 });

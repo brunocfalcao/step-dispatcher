@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.3 - 2026-08-04
+
+### Race-safe stale Running recovery
+
+- Stale Running candidates are locked and rechecked against current state,
+  age, and child-tree truth before recovery; a worker completion or committed
+  child created after the initial scan cannot be reopened.
+- Recovery alerts identify the oldest step actually recovered rather than a
+  protected candidate skipped from the initial scan.
+- The fresh Pest 5 TIA gate passes 217 tests and 554 assertions.
+
 ## 1.20.2 - 2026-08-01
 
 ### Laravel 13 and Pest 5 verification

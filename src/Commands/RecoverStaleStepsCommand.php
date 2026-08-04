@@ -127,18 +127,70 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 ->flip();
 
         $recovered = 0;
+        $oldestRecoveredStep = null;
 
         foreach ($staleSteps as $step) {
+            if ($step->isParent() && $populatedChildBlocks->has($step->child_block_uuid)) {
+                continue;
+            }
+
+            $recoveredStep = $this->recoverLockedStaleRunningStep($step->id);
+
+            if ($recoveredStep === null) {
+                continue;
+            }
+
+            $recovered++;
+            if ($oldestRecoveredStep === null
+                || $recoveredStep->started_at->isBefore($oldestRecoveredStep->started_at)) {
+                $oldestRecoveredStep = $recoveredStep;
+            }
+            $this->verboseLine("[Step {$recoveredStep->id}] {$recoveredStep->label}: recovered ({$recoveredStep->class})");
+        }
+
+        if ($recovered === 0) {
+            return;
+        }
+
+        $this->verboseInfo("Recovered {$recovered} stale step(s).");
+
+        StaleStepsDetected::dispatch(
+            severity: 'warning',
+            reason: 'stale_running_steps_recovered',
+            count: $recovered,
+            oldestStep: $oldestRecoveredStep,
+            context: ['hostname' => gethostname()],
+        );
+    }
+
+    /**
+     * Re-check and recover one candidate while holding its row lock.
+     */
+    private function recoverLockedStaleRunningStep(int $stepId): ?Step
+    {
+        return DB::transaction(function () use ($stepId): ?Step {
+            $step = Step::query()->whereKey($stepId)->lockForUpdate()->first();
+
+            if ($step === null || ! ($step->state instanceof Running) || $step->started_at === null) {
+                return null;
+            }
+
             $timeout = $this->resolveJobTimeout($step);
             $staleThreshold = $timeout + self::RUNNING_BUFFER_SECONDS;
             $runningSeconds = (int) $step->started_at->diffInSeconds(now());
 
             if ($runningSeconds < $staleThreshold) {
-                continue;
+                return null;
             }
 
-            if ($step->isParent() && $populatedChildBlocks->has($step->child_block_uuid)) {
-                continue;
+            $hasCommittedChild = $step->isParent()
+                && Step::query()
+                    ->where('block_uuid', $step->child_block_uuid)
+                    ->sharedLock()
+                    ->first(['id']) !== null;
+
+            if ($hasCommittedChild) {
+                return null;
             }
 
             $maxRetries = $this->resolveJobMaxRetries($step);
@@ -178,23 +230,8 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 ]);
             }
 
-            $recovered++;
-            $this->verboseLine("[Step {$step->id}] {$step->label}: recovered ({$step->class})");
-        }
-
-        if ($recovered === 0) {
-            return;
-        }
-
-        $this->verboseInfo("Recovered {$recovered} stale step(s).");
-
-        StaleStepsDetected::dispatch(
-            severity: 'warning',
-            reason: 'stale_running_steps_recovered',
-            count: $recovered,
-            oldestStep: $staleSteps->first(),
-            context: ['hostname' => gethostname()],
-        );
+            return $step;
+        });
     }
 
     private function resolveJobTimeout(Step $step): int
