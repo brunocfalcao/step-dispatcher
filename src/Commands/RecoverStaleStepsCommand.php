@@ -314,11 +314,11 @@ final class RecoverStaleStepsCommand extends BaseCommand
         // to Pending so the next dispatcher tick re-pushes each step to its
         // original queue.
         if ($alreadyRecovered === $count) {
-            $requeued = $this->requeueDispatchedSteps(
+            $recovery = $this->recoverDispatchedSteps(
                 Step::query()->whereIn('id', $staleIds),
             );
 
-            $this->verboseError("CRITICAL: {$alreadyRecovered} step(s) still stuck after recovery; re-queued {$requeued}.");
+            $this->verboseError("CRITICAL: {$alreadyRecovered} step(s) still stuck after recovery; re-queued {$recovery['requeued']}, failed {$recovery['failed']}.");
 
             StaleStepsDetected::dispatch(
                 severity: 'critical',
@@ -328,7 +328,8 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 oldestStep: $oldestStep,
                 context: [
                     'step_threshold_seconds' => $thresholdSeconds,
-                    'requeued_count' => $requeued,
+                    'requeued_count' => $recovery['requeued'],
+                    'failed_count' => $recovery['failed'],
                     'hostname' => gethostname(),
                 ],
             );
@@ -348,11 +349,11 @@ final class RecoverStaleStepsCommand extends BaseCommand
 
         // Transition every pinned candidate back to Pending, including rows
         // whose updated_at changed during the priority update above.
-        $requeued = $this->requeueDispatchedSteps(
+        $recovery = $this->recoverDispatchedSteps(
             Step::query()->whereIn('id', $staleIds),
         );
 
-        $this->verboseInfo("Raised {$promoted} stale Dispatched step(s) to high priority on their original queues; re-queued {$requeued}.");
+        $this->verboseInfo("Raised {$promoted} stale Dispatched step(s) to high priority on their original queues; re-queued {$recovery['requeued']}, failed {$recovery['failed']}.");
 
         StaleStepsDetected::dispatch(
             severity: 'warning',
@@ -363,15 +364,15 @@ final class RecoverStaleStepsCommand extends BaseCommand
             oldestStep: $oldestStep,
             context: [
                 'step_threshold_seconds' => $thresholdSeconds,
-                'requeued_count' => $requeued,
+                'requeued_count' => $recovery['requeued'],
+                'failed_count' => $recovery['failed'],
                 'hostname' => gethostname(),
             ],
         );
     }
 
     /**
-     * Transition each stale Dispatched step back to Pending via the registered
-     * state-machine transition. Returns the number of rows flipped.
+     * Recover each stale Dispatched step within its declared retry budget.
      *
      * Uses the transition (not a bulk `update`) so the state machine fires
      * correctly — timers reset, retries increment, diagnostic log entry lands.
@@ -381,31 +382,75 @@ final class RecoverStaleStepsCommand extends BaseCommand
      * sees a step already in Running state.
      *
      * @param  Builder<Step>  $query
+     * @return array{requeued: int, failed: int}
      */
-    private function requeueDispatchedSteps($query): int
+    private function recoverDispatchedSteps(Builder $query): array
     {
         $requeued = 0;
+        $failed = 0;
 
-        (clone $query)->get()->each(function (Step $step) use (&$requeued): void {
-            // Re-read DB truth before firing the transition. The collection
-            // was hydrated moments ago; between that fetch and this
-            // iteration a legit worker can have popped the Redis payload
-            // and advanced the step Dispatched → Running. Acting on the
-            // stale in-memory snapshot would clobber the active run — reset
-            // started_at, burn a retry, force a duplicate execution. A
-            // refresh closes the window: if state has moved past Dispatched
-            // we leave it alone.
-            $step->refresh();
+        (clone $query)->get(['id'])->each(function (Step $candidate) use (&$requeued, &$failed): void {
+            $outcome = $this->recoverLockedStaleDispatchedStep($candidate->id);
 
-            if (! ($step->state instanceof Dispatched)) {
-                return;
+            if ($outcome === 'requeued') {
+                $requeued++;
             }
 
-            $step->state->transitionTo(Pending::class);
-            $requeued++;
+            if ($outcome === 'failed') {
+                $failed++;
+            }
         });
 
-        return $requeued;
+        return ['requeued' => $requeued, 'failed' => $failed];
+    }
+
+    /**
+     * Lock the final state check and recovery transition together.
+     *
+     * A plain refresh only narrows the worker-start race: a worker can still
+     * change Dispatched to Running after that read but before the recovery
+     * transition. The row lock makes either actor observe the other's durable
+     * state before it writes.
+     *
+     * @return 'requeued'|'failed'|'skipped'
+     */
+    private function recoverLockedStaleDispatchedStep(int $stepId): string
+    {
+        return DB::transaction(function () use ($stepId): string {
+            $step = Step::query()->whereKey($stepId)->lockForUpdate()->first();
+
+            if ($step === null || ! ($step->state instanceof Dispatched)) {
+                return 'skipped';
+            }
+
+            $maxRetries = $this->resolveJobMaxRetries($step);
+
+            if ($step->retries >= $maxRetries) {
+                $step->update([
+                    'error_message' => "Recovered by stale detector: Dispatched recovery retries exhausted ({$step->retries}/{$maxRetries})",
+                ]);
+                $step->state->transitionTo(Failed::class);
+
+                Log::warning('Stale dispatched step failed (retries exhausted)', [
+                    'step_id' => $step->id,
+                    'class' => $step->class,
+                    'label' => $step->label,
+                    'retries' => $step->retries,
+                ]);
+
+                return 'failed';
+            }
+
+            // A lost dispatched payload is a genuine retry, even when the
+            // step retained an earlier throttle marker. Clear it so the
+            // DispatchedToPending transition advances the recovery budget.
+            $step->update([
+                'error_message' => "Recovered by stale detector: Dispatched payload stalled, retrying ({$step->retries}/{$maxRetries})",
+                'is_throttled' => false,
+            ]);
+            $step->state->transitionTo(Pending::class);
+            return 'requeued';
+        });
     }
 
     // ========================================================================

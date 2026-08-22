@@ -73,8 +73,11 @@ final class StepObserver
             $needsWorkflow = empty($step->workflow_id);
             $needsPriority = $step->priority === null;
             $needsGroup = empty($step->group);
+            // A workflow owner is a complete morph pair. One half alone is
+            // not an explicit child owner and must not prevent inheritance.
+            $needsRelatable = empty($step->relatable_type) || empty($step->relatable_id);
 
-            $parentStep = ($needsWorkflow || $needsPriority || $needsGroup)
+            $parentStep = ($needsWorkflow || $needsPriority || $needsGroup || $needsRelatable)
                 ? Step::query()->where('child_block_uuid', $step->block_uuid)->first()
                 : null;
 
@@ -92,30 +95,55 @@ final class StepObserver
                 $needsGroup = false;
             }
 
-            // Sibling fallbacks (same block) only when the parent lookup
-            // didn't resolve the field — the uncommon path.
-            if ($needsWorkflow) {
-                $siblingStep = Step::query()
-                    ->where('block_uuid', $step->block_uuid)
-                    ->whereNotNull('workflow_id')
-                    ->first();
-
-                if ($siblingStep !== null) {
-                    $step->workflow_id = $siblingStep->workflow_id;
-                    $needsWorkflow = false;
-                }
+            if ($needsRelatable
+                && $parentStep !== null
+                && ! empty($parentStep->relatable_type)
+                && ! empty($parentStep->relatable_id)) {
+                $step->relatable_type = $parentStep->relatable_type;
+                $step->relatable_id = $parentStep->relatable_id;
+                $needsRelatable = false;
             }
 
-            if ($needsGroup) {
-                $siblingStep = Step::query()
+            // Sibling fallbacks (same block) only when the parent lookup
+            // didn't resolve the field — the uncommon path.
+            $siblingStep = ($needsWorkflow || $needsGroup || $needsRelatable)
+                ? Step::query()
                     ->where('block_uuid', $step->block_uuid)
-                    ->whereNotNull('group')
-                    ->first();
+                    ->where(static function ($query) use ($needsWorkflow, $needsGroup, $needsRelatable): void {
+                        if ($needsWorkflow) {
+                            $query->orWhereNotNull('workflow_id');
+                        }
 
-                if ($siblingStep !== null) {
-                    $step->group = $siblingStep->group;
-                    $needsGroup = false;
-                }
+                        if ($needsGroup) {
+                            $query->orWhereNotNull('group');
+                        }
+
+                        if ($needsRelatable) {
+                            $query->orWhere(static function ($ownerQuery): void {
+                                $ownerQuery->whereNotNull('relatable_type')
+                                    ->whereNotNull('relatable_id');
+                            });
+                        }
+                    })
+                    ->first()
+                : null;
+
+            if ($needsWorkflow && $siblingStep !== null && ! empty($siblingStep->workflow_id)) {
+                $step->workflow_id = $siblingStep->workflow_id;
+                $needsWorkflow = false;
+            }
+
+            if ($needsGroup && $siblingStep !== null && ! empty($siblingStep->group)) {
+                $step->group = $siblingStep->group;
+                $needsGroup = false;
+            }
+
+            if ($needsRelatable
+                && $siblingStep !== null
+                && ! empty($siblingStep->relatable_type)
+                && ! empty($siblingStep->relatable_id)) {
+                $step->relatable_type = $siblingStep->relatable_type;
+                $step->relatable_id = $siblingStep->relatable_id;
             }
 
             if ($needsWorkflow) {

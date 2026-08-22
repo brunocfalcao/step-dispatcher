@@ -105,3 +105,67 @@ it('routes a high-priority step with an invalid queue to the priority lane, not 
 
     expect($step->queue)->toBe('priority');
 });
+
+it('inherits workflow ownership from the parent unless the child sets its own owner', function (): void {
+    $parent = Step::create([
+        'class' => 'App\\EchoJob',
+        'type' => 'default',
+        'queue' => 'default',
+        'child_block_uuid' => 'children-'.uniqid(),
+        'relatable_type' => 'App\\Models\\KnowledgeBase',
+        'relatable_id' => 41,
+        'state' => Pending::class,
+    ]);
+
+    $inherited = Step::create([
+        'class' => 'App\\EchoJob',
+        'type' => 'default',
+        'queue' => 'default',
+        'block_uuid' => $parent->child_block_uuid,
+        'state' => Pending::class,
+    ]);
+
+    $explicit = Step::create([
+        'class' => 'App\\EchoJob',
+        'type' => 'default',
+        'queue' => 'default',
+        'block_uuid' => $parent->child_block_uuid,
+        'relatable_type' => 'App\\Models\\Source',
+        'relatable_id' => 99,
+        'state' => Pending::class,
+    ]);
+
+    expect($inherited->relatable_type)->toBe('App\\Models\\KnowledgeBase')
+        ->and($inherited->relatable_id)->toBe(41)
+        ->and($explicit->relatable_type)->toBe('App\\Models\\Source')
+        ->and($explicit->relatable_id)->toBe(99);
+});
+
+it('repairs an incomplete child owner from its complete parent owner', function (array $incompleteOwner): void {
+    $parent = Step::create([
+        'class' => 'App\\EchoJob',
+        'type' => 'default',
+        'queue' => 'default',
+        'child_block_uuid' => 'children-'.uniqid(),
+        'relatable_type' => 'App\\Models\\KnowledgeBase',
+        'relatable_id' => 41,
+        'state' => Pending::class,
+    ]);
+
+    $child = Step::create([
+        'class' => 'App\\EchoJob',
+        'type' => 'default',
+        'queue' => 'default',
+        'block_uuid' => $parent->child_block_uuid,
+        'state' => Pending::class,
+        ...$incompleteOwner,
+    ]);
+
+    expect($child->relatable_type)->toBe('App\\Models\\KnowledgeBase')
+        ->and($child->relatable_id)->toBe(41);
+})->with([
+    'type without id' => [['relatable_type' => 'App\\Models\\Source']],
+    'id without type' => [['relatable_id' => 99]],
+    'empty type with id' => [['relatable_type' => '', 'relatable_id' => 99]],
+    'type with zero id' => [['relatable_type' => 'App\\Models\\Source', 'relatable_id' => 0]],
+]);

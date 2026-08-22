@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.4 - 2026-08-23
+
+### Race-safe dispatched recovery
+
+- Dispatched recovery now locks the final state check with its transition, so
+  a worker that starts at the recovery boundary cannot be returned to Pending.
+- Repeated stale recovery respects each job's retry budget and records whether
+  the affected step was requeued or failed.
+
+### Workflow ownership inheritance
+
+- Child steps now inherit a complete parent owner when supplied only one half
+  of the owner pair; a fully specified child owner remains unchanged.
+
 ## 1.20.3 - 2026-08-04
 
 ### Race-safe stale Running recovery

@@ -6,11 +6,14 @@ use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
+use StepDispatcher\Commands\RecoverStaleStepsCommand;
 use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Dispatched;
+use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\Tests\Fixtures\ConstructorArgTestJob;
 
 beforeEach(function () {
     config()->set('step-dispatcher.flag_path', sys_get_temp_dir());
@@ -99,6 +102,16 @@ it('does not clobber a step that races to Running between fetch and transition',
     );
 });
 
+it('locks the final dispatched-state check with the recovery transition', function (): void {
+    $reflection = new ReflectionMethod(RecoverStaleStepsCommand::class, 'recoverLockedStaleDispatchedStep');
+    $file = (new ReflectionClass(RecoverStaleStepsCommand::class))->getFileName();
+    $source = implode('', array_slice(file($file), $reflection->getStartLine() - 1, $reflection->getEndLine() - $reflection->getStartLine() + 1));
+
+    expect($source)
+        ->toContain('DB::transaction')
+        ->toContain('->whereKey($stepId)->lockForUpdate()->first()');
+});
+
 it('requeues stale dispatched work on its original worker lane', function () {
     Event::fake([StaleStepsDetected::class]);
 
@@ -135,11 +148,11 @@ it('requeues stale dispatched work on its original worker lane', function () {
     );
 });
 
-it('escalates a dispatched step that becomes stale again after recovery', function () {
+it('fails dispatched work after its declared recovery budget is exhausted', function () {
     Event::fake([StaleStepsDetected::class]);
 
     $step = Step::create([
-        'class' => 'App\\Jobs\\TestJob',
+        'class' => ConstructorArgTestJob::class,
         'type' => 'default',
         'queue' => 'positions',
         'priority' => 'high',
@@ -161,12 +174,43 @@ it('escalates a dispatched step that becomes stale again after recovery', functi
         '--step-threshold' => 0,
     ]);
 
-    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
-        ->and($step->fresh()->queue)->toBe('positions');
+    expect($step->fresh()->state)->toBeInstanceOf(Failed::class)
+        ->and($step->fresh()->queue)->toBe('positions')
+        ->and($step->fresh()->error_message)->toContain('retries exhausted');
 
     Event::assertDispatched(
         StaleStepsDetected::class,
         fn (StaleStepsDetected $event): bool => $event->severity === 'critical'
             && $event->reason === 'stale_dispatched_steps_still_stuck',
     );
+});
+
+it('clears a stale throttle marker so dispatched recovery consumes its retry budget', function () {
+    $step = Step::create([
+        'class' => ConstructorArgTestJob::class,
+        'type' => 'default',
+        'queue' => 'positions',
+        'priority' => 'high',
+        'group' => 'test-group',
+        'index' => 1,
+        'block_uuid' => (string) Str::uuid(),
+        'retries' => 0,
+        'is_throttled' => true,
+    ]);
+
+    Step::withoutEvents(function () use ($step): void {
+        DB::table('steps')->where('id', $step->id)->update([
+            'state' => Dispatched::class,
+            'updated_at' => now()->subMinutes(10),
+        ]);
+    });
+
+    Artisan::call('steps:recover-stale', [
+        '--recover-dispatched' => true,
+        '--step-threshold' => 0,
+    ]);
+
+    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
+        ->and($step->fresh()->is_throttled)->toBeFalse()
+        ->and($step->fresh()->retries)->toBe(1);
 });
