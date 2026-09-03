@@ -9,7 +9,9 @@ use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
+use StepDispatcher\States\Running;
 use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+use StepDispatcher\Tests\Fixtures\ResolvingOnFailureTestJob;
 use StepDispatcher\Tests\Fixtures\ZeroRetryTestJob;
 
 /*
@@ -87,6 +89,35 @@ it('does not clobber a recovered Pending step when failed() fires late', functio
     $job->failed(new RuntimeException('zombie failure callback'));
 
     expect($step->fresh()->state)->toBeInstanceOf(Pending::class);
+});
+
+it('runs the job resolveException hook when failed() fires on a killed step', function (): void {
+    ResolvingOnFailureTestJob::reset();
+    $step = makeFailureStep(Running::class, ResolvingOnFailureTestJob::class);
+
+    $job = new ResolvingOnFailureTestJob;
+    $job->step = $step;
+
+    $job->failed(new RuntimeException('killed by queue timeout'));
+
+    expect($step->fresh()->state)->toBeInstanceOf(Failed::class)
+        ->and(ResolvingOnFailureTestJob::$resolved)->toBeTrue()
+        // The hook must see the recorded failure, not a null column —
+        // domain records quote it back to the user as the reason.
+        ->and(ResolvingOnFailureTestJob::$resolvedErrorMessage)->not->toBeNull();
+});
+
+it('does not run the resolveException hook when failed() leaves the step alone', function (): void {
+    ResolvingOnFailureTestJob::reset();
+    $step = makeFailureStep(Cancelled::class, ResolvingOnFailureTestJob::class);
+
+    $job = new ResolvingOnFailureTestJob;
+    $job->step = $step;
+
+    $job->failed(new RuntimeException('zombie failure callback after cancel'));
+
+    expect($step->fresh()->state)->toBeInstanceOf(Cancelled::class)
+        ->and(ResolvingOnFailureTestJob::$resolved)->toBeFalse();
 });
 
 it('does not escalate a zero-retry job to high priority before any retry', function (): void {

@@ -232,6 +232,17 @@ abstract class BaseStepJob implements ShouldQueue
             // recovery.
             if ($this->step->state instanceof Running || $this->step->state instanceof Dispatched) {
                 $this->step->state->transitionTo(Failed::class);
+
+                // handle()'s catch block is the only other place that runs the
+                // job's resolveException() hook, and a queue-level kill
+                // (timeout, SIGKILL) never reaches it. Without this, a job that
+                // releases its own domain record on failure leaves that record
+                // pinned in its in-progress state forever — a timed-out
+                // architecture discovery stayed "researching" and every later
+                // discovery for that item was refused as already running.
+                // Runs only inside this guard: a step someone else cancelled or
+                // recovered was not failed here, so it has nothing to release.
+                $this->resolveExceptionIfPossible($e);
             }
         } finally {
             $context->pop();
