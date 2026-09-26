@@ -348,7 +348,9 @@ abstract class BaseStepJob implements ShouldQueue
         }
 
         if (! $this->shouldStartOrRetry()) {
-            $this->retryJob();
+            if (! $this->stepStatusUpdated) {
+                $this->retryJob();
+            }
 
             return true;
         }

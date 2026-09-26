@@ -26,6 +26,8 @@ final class GuardedTestJob extends BaseStepJob
 
     public static bool $retry = false;
 
+    public static bool $throttle = false;
+
     public static int $computeRuns = 0;
 
     protected function compute(): mixed
@@ -52,6 +54,12 @@ final class GuardedTestJob extends BaseStepJob
 
     public function startOrRetry(): bool
     {
+        if (static::$throttle) {
+            $this->rescheduleWithoutRetry(now()->addMinute());
+
+            return false;
+        }
+
         return ! static::$retry;
     }
 
@@ -61,6 +69,7 @@ final class GuardedTestJob extends BaseStepJob
         static::$skip = false;
         static::$fail = false;
         static::$retry = false;
+        static::$throttle = false;
         static::$computeRuns = 0;
     }
 }

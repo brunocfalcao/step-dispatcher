@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.5 - 2026-09-27
+
+### Throttle-aware guards
+
+- A job guard that already reschedules a throttled step no longer consumes an
+  additional retry before the dispatcher returns it to Pending.
+
 ## 1.20.4 - 2026-08-23
 
 ### Race-safe dispatched recovery

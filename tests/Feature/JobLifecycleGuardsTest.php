@@ -101,6 +101,21 @@ it('reschedules to Pending when startOrRetry returns false, before compute', fun
         ->and(GuardedTestJob::$computeRuns)->toBe(0);
 });
 
+it('keeps a guard throttle reschedule without incrementing retries', function (): void {
+    GuardedTestJob::$throttle = true;
+    $step = guardedStep();
+
+    expect((int) $step->retries)->toBe(0)
+        ->and((bool) $step->is_throttled)->toBeFalse();
+
+    $fresh = runGuarded($step);
+
+    expect($fresh->state)->toBeInstanceOf(Pending::class)
+        ->and((int) $fresh->retries)->toBe(0)
+        ->and((bool) $fresh->is_throttled)->toBeTrue()
+        ->and(GuardedTestJob::$computeRuns)->toBe(0);
+});
+
 it('fails the step when startOrFail returns false', function (): void {
     GuardedTestJob::$fail = true;
 
