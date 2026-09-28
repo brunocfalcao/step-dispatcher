@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.6 - 2026-09-28
+
+### Improvements
+
+- [IMPROVED] Reconciled the README with the full package API, lifecycle, queue routing, prefix isolation, recovery, retention, and diagnostics; corrected unsupported guarantees and installation/testing claims. Documentation only; runtime unchanged.
+
 ## 1.20.5 - 2026-09-27
 
 ### Throttle-aware guards
