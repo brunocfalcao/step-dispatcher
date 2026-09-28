@@ -49,6 +49,8 @@ PostgreSQL, and SQLite; an unrecognized driver receives the generic handler.
 This is not a claim that every supported framework/database combination has a
 committed CI matrix. Validate your chosen engine's locking, recursive CTE,
 timestamp, and queue behavior before relying on it in production.
+SQLite's Laravel grammar ignores row-lock clauses; the in-memory suite does not
+prove the row-lock behavior of a production database.
 
 Asynchronous work needs a configured Laravel queue connection and worker.
 Horizon and Redis are host application choices, not package requirements.
@@ -629,7 +631,8 @@ Unknown from `workflowState()` because that API examines only live rows.
 `tableName()`, `getTable()`, `prefix()`, `getDispatchGroup()`, state-list helpers,
 parent creation and logging methods are described above/below. `StepsArchive`,
 `StepsDispatcher`, and `StepsDispatcherTicks` represent archive, coordination,
-and tick rows. Low-level public sweep, batch transition, dispatch-cache,
+and tick rows; a tick's `steps()` relation accesses the rows linked by `tick_id`.
+Low-level public sweep, batch transition, dispatch-cache,
 concluded-index, and nested-block helpers are implementation-oriented; their
 exact signatures are in [StepDispatcher](src/Support/StepDispatcher.php).
 Group lock/tick methods are in [StepsDispatcher](src/Models/StepsDispatcher.php).
