@@ -726,6 +726,14 @@ specific local result, not a timing SLA or cross-database CI certification.
 The documentation reconciliation in [CHANGELOG.md](CHANGELOG.md) changes no
 runtime behavior. Runtime baseline for this audit: v1.20.5.
 
+## Changes in v1.20.6
+
+- Documentation only: the README now matches the full package API, lifecycle,
+  queue routing, prefix isolation, recovery, retention, and diagnostics, and
+  drops guarantees and installation or testing claims the code does not make.
+- No runtime change from v1.20.5 (throttle-aware guards no longer consume an
+  extra retry).
+
 ## License
 
 Proprietary; see the license declaration in [composer.json](composer.json).
