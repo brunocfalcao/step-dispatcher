@@ -25,6 +25,7 @@ final class DispatchedToCancelled extends Transition
     public function handle(): Step
     {
         $this->step->state = new Cancelled($this->step); // Apply the Cancelled state
+        $this->step->completed_at = now();
         $this->step->save(); // Save the transition
 
         Step::log($this->step->id, 'states', 'Dispatched → Cancelled');

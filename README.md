@@ -1,5 +1,11 @@
 # step-dispatcher
 
+## Changes in v1.20.7
+
+Cancelled, skipped and stopped outcomes now record completion time on the four
+previously untimed transitions. A step that never started still has no start
+time. Ordered dispatch, retries and state semantics stay unchanged.
+
 A database-backed workflow orchestrator for Laravel queues. Each step is an
 Eloquent row with a state, inputs, result, retry counter, and workflow links.
 The dispatcher claims eligible rows; Laravel workers run their job classes.

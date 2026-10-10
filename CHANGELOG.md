@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.7 - 2026-10-10
+
+### Fixed
+- Pending cancellation/skip, dispatched cancellation and running stop transitions
+  set completion timestamps consistently. Never-started steps retain null start
+  timestamps; ordering, retry budgets and terminal states are unchanged.
+
+### Documentation
+- Added shared PROJECT.md guidance with thin AGENTS.md and CLAUDE.md pointers.
+
 ## 1.20.6 - 2026-09-28
 
 ### Improvements
