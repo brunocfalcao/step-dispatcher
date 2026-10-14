@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.8 - 2026-10-14 (local checkpoint, not released)
+
+### Fixes
+
+- [BUG FIX] Honor configured job timeouts during stale recovery while preserving reflected defaults, the recovery buffer and retry transitions.
+
+### Improvements
+
+- [IMPROVED] Document the optional runtime timeout contract and cover configured, legacy and nonpositive timeout values.
+
 ## 1.20.7 - 2026-10-10
 
 ### Fixed

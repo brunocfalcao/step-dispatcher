@@ -79,6 +79,16 @@ abstract class BaseStepJob implements ShouldQueue
     abstract protected function compute();
 
     /**
+     * Return the runtime timeout used by stale-step recovery.
+     *
+     * A null result keeps the legacy reflected `$timeout` property behavior.
+     */
+    public static function timeoutSeconds(): ?int
+    {
+        return null;
+    }
+
+    /**
      * Restore prefix BEFORE the SerializesModels trait re-fetches
      * the Step model from the queue payload. Laravel's CallQueuedHandler
      * calls `__unserialize()` immediately after pulling the job off

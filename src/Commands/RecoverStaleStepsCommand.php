@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use ReflectionClass;
 use ReflectionException;
+use StepDispatcher\Abstracts\BaseStepJob;
 use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
@@ -240,6 +241,16 @@ final class RecoverStaleStepsCommand extends BaseCommand
         // own timeout". For stale detection we need a positive number, so fall back
         // to DEFAULT_TIMEOUT. Without this, every such job is considered stale after
         // 60s (0 + BUFFER), which kills legitimate long-running work.
+        if ($step->class
+            && class_exists($step->class)
+            && is_a($step->class, BaseStepJob::class, true)) {
+            $runtimeTimeout = $step->class::timeoutSeconds();
+
+            if ($runtimeTimeout !== null) {
+                return $runtimeTimeout > 0 ? $runtimeTimeout : self::DEFAULT_TIMEOUT;
+            }
+        }
+
         return $this->resolveJobIntProperty($step, 'timeout', self::DEFAULT_TIMEOUT);
     }
 

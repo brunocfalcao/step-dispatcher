@@ -158,6 +158,10 @@ inputs and resolve services inside the job when needed. The dispatcher attaches
 A positive public `$retries` property must be supplied by your job: the base
 class does not declare one. Laravel queue `$tries` and the step retry counter
 are separate controls. A positive public `$timeout` also informs stale recovery.
+Jobs with a configured runtime budget can override
+`public static function timeoutSeconds(): ?int`. Returning `null` retains the
+reflected property default; nonpositive overrides use the existing 300-second
+fallback. The recovery buffer remains 60 seconds.
 
 ### Stored results and timing
 
