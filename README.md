@@ -1,5 +1,12 @@
 # step-dispatcher
 
+## Changes in v1.20.8
+
+Stale-step recovery now honors a job's configured runtime budget. A job can
+override `public static function timeoutSeconds(): ?int`; returning `null`
+keeps the reflected `$timeout` default, and nonpositive values keep the
+300-second fallback. The 60-second recovery buffer and retries are unchanged.
+
 ## Changes in v1.20.7
 
 Cancelled, skipped and stopped outcomes now record completion time on the four

@@ -2,15 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.20.8 - 2026-10-14 (local checkpoint, not released)
+## 1.20.8 - 2026-10-16
 
-### Fixes
+### Fixed
+- Stale-step recovery honors a job's configured runtime timeout through the
+  optional `BaseStepJob::timeoutSeconds()` hook. A `null` result keeps the
+  reflected `$timeout` property default; nonpositive values keep the existing
+  300-second fallback. The 60-second recovery buffer and retry transitions are
+  unchanged.
 
-- [BUG FIX] Honor configured job timeouts during stale recovery while preserving reflected defaults, the recovery buffer and retry transitions.
-
-### Improvements
-
-- [IMPROVED] Document the optional runtime timeout contract and cover configured, legacy and nonpositive timeout values.
+### Documentation
+- Documented the optional runtime timeout hook in the README and PROJECT.md, and
+  covered configured, legacy and nonpositive timeout values in the test suite.
 
 ## 1.20.7 - 2026-10-10
 
