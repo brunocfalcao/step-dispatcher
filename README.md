@@ -1,5 +1,11 @@
 # step-dispatcher
 
+## Changes in v1.20.9
+
+Stale-worker recovery processes multiple stalled Steps without crashing after
+retry transitions clear their start times. Recovery alerts retain the oldest
+original start. Retry budgets and active-worker protection are unchanged.
+
 ## Changes in v1.20.8
 
 Stale-step recovery now honors a job's configured runtime budget. A job can

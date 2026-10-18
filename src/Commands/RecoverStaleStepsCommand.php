@@ -142,9 +142,10 @@ final class RecoverStaleStepsCommand extends BaseCommand
             }
 
             $recovered++;
+            // Retrying clears timing on the recovered row; retain the scan's original start.
             if ($oldestRecoveredStep === null
-                || $recoveredStep->started_at->isBefore($oldestRecoveredStep->started_at)) {
-                $oldestRecoveredStep = $recoveredStep;
+                || $step->started_at->isBefore($oldestRecoveredStep->started_at)) {
+                $oldestRecoveredStep = $step;
             }
             $this->verboseLine("[Step {$recoveredStep->id}] {$recoveredStep->label}: recovered ({$recoveredStep->class})");
         }
@@ -460,6 +461,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 'is_throttled' => false,
             ]);
             $step->state->transitionTo(Pending::class);
+
             return 'requeued';
         });
     }

@@ -29,6 +29,10 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
 - Preserve persisted state transitions, group locking, ordering, recovery, retries, and idempotency. Inspect the closest package tests before changing lifecycle behavior. The package now owns a Pest/Testbench suite; the old host-only test instructions are obsolete. Public dependency compatibility and the development test stack are separate contracts.
 - Stale recovery honors `BaseStepJob::timeoutSeconds()` for configured job budgets. Its default `null` preserves reflected property defaults; nonpositive overrides retain the existing 300-second fallback. The 60-second recovery buffer and retry transitions are unchanged.
 
+- Stale-running recovery retains the original scan snapshot for alert timing;
+  retry transitions clear the persisted start timestamp. Recovery must process
+  multiple stalled Steps without dereferencing the reset timestamp.
+
 ## Code map
 
 `src/`, `tests/`. Inspect these entrypoints and their actual callers for the area being changed.

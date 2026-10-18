@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.20.9 - 2026-10-18
+
+### Fixed
+- Recover every stale Step when several workers have stalled. Retry transitions
+  clear start timestamps; oldest-Step selection now retains the original scan
+  timestamp instead of reading the cleared value. Live workers and exhausted
+  retry budgets retain their existing treatment.
+
 ## 1.20.8 - 2026-10-16
 
 ### Fixed
