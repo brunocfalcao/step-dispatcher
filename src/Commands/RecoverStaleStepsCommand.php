@@ -19,6 +19,8 @@ use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\BaseCommand;
+use StepDispatcher\Support\Cooldown;
+use StepDispatcher\Support\Steps;
 
 /**
  * Consolidated stall-recovery command.
@@ -548,6 +550,11 @@ final class RecoverStaleStepsCommand extends BaseCommand
      */
     private function detectGroupNoProgress(int $thresholdSeconds): void
     {
+        // A cooldown holds Pending work on purpose: no progress is expected.
+        if (Cooldown::isActive(Steps::currentPrefix())) {
+            return;
+        }
+
         $cutoff = now()->subSeconds($thresholdSeconds);
 
         // `group` is a reserved word; quote it through the active connection's

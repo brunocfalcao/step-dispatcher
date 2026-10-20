@@ -33,6 +33,12 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
   retry transitions clear the persisted start timestamp. Recovery must process
   multiple stalled Steps without dereferencing the reset timestamp.
 
+- Cooldown (`src/Support/Cooldown.php`) holds unstarted top-level blocks and
+  never pauses bookkeeping. A started top-level block is atomic, descendants
+  included. "Started" survives a return to Pending through `tick_id`,
+  `retries` and `was_throttled`. Filtering happens in SQL before the per-tick
+  cap. A missing `steps_cooldowns` table means no cooldown.
+
 ## Code map
 
 `src/`, `tests/`. Inspect these entrypoints and their actual callers for the area being changed.

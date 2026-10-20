@@ -119,6 +119,53 @@ final class StepDispatcher
     }
 
     /**
+     * Cool down: steps keep being created but no new top-level block
+     * starts; started top-level blocks still run to the end. `null` cools
+     * every scope; a scope name (`''` default, `'trading'`, ...) cools
+     * only that table set. See Support\Cooldown.
+     */
+    public static function cooldown(?string $scope = null): void
+    {
+        Cooldown::start($scope);
+    }
+
+    /**
+     * End a cooldown and let dispatching resume. `null` ends every
+     * cooldown; a scope name ends only that scope's own cooldown.
+     */
+    public static function warmup(?string $scope = null): void
+    {
+        Cooldown::end($scope);
+    }
+
+    /**
+     * Is a cooldown in force? `null`: the global one. A scope: that scope
+     * is held, by its own cooldown or by the global one.
+     */
+    public static function isCooldownActive(?string $scope = null): bool
+    {
+        return Cooldown::isActive($scope);
+    }
+
+    /**
+     * In cooldown but not fully cooled: started work is still finishing.
+     * `null` asks whether any scope is in that position.
+     */
+    public static function isInCoolDown(?string $scope = null): bool
+    {
+        return Cooldown::isCoolingDown($scope);
+    }
+
+    /**
+     * Fully cooled: in cooldown and nothing started is left to finish.
+     * `null` asks whether every scope is in that position.
+     */
+    public static function isCooledDown(?string $scope = null): bool
+    {
+        return Cooldown::isCooledDown($scope);
+    }
+
+    /**
      * Check if any steps are in an active (non-idle) state.
      * Active states: Pending, Dispatched, Running.
      * Uses EXISTS for sub-millisecond performance on indexed state column.
@@ -212,11 +259,16 @@ final class StepDispatcher
         $progress = 0;
 
         try {
+            // During a cooldown only blocks of started top-level blocks may
+            // dispatch (null = no cooldown, nothing to filter). Bookkeeping
+            // below runs either way so started work can still finish.
+            $allowedBlocks = Cooldown::dispatchableBlocks($group);
+
             // Money-critical workflows must not wait behind a large cleanup
             // backlog. Dispatch every currently-runnable priority step first,
             // then retain the established one-cleanup-phase-per-tick pacing
             // for nested workflow state transitions.
-            $priorityDispatched = self::dispatchPrioritySteps($group);
+            $priorityDispatched = self::dispatchPrioritySteps($group, $allowedBlocks);
 
             $result = self::skipAllChildStepsOnParentAndChildSingleStep($group);
             if ($result) {
@@ -275,6 +327,12 @@ final class StepDispatcher
                 return;
             }
 
+            // A cooldown that began during this tick's bookkeeping holds
+            // the steps handed out below too.
+            if ($allowedBlocks === null) {
+                $allowedBlocks = Cooldown::dispatchableBlocks($group);
+            }
+
             // Distribute the steps to be dispatched.
             $dispatchedSteps = collect();
 
@@ -291,6 +349,7 @@ final class StepDispatcher
                     $query->whereNull('priority')
                         ->orWhere('priority', '!=', 'high');
                 })
+                ->when($allowedBlocks !== null, static fn ($query) => $query->whereIn('block_uuid', $allowedBlocks))
                 ->orderBy('id', 'asc');
 
             $maxPerTick = (int) config('step-dispatcher.dispatch.max_per_tick', 0);
@@ -341,6 +400,7 @@ final class StepDispatcher
                         $q->whereNull('dispatch_after')
                             ->orWhere('dispatch_after', '<=', now());
                     })
+                    ->when($allowedBlocks !== null, static fn ($query) => $query->whereIn('block_uuid', $allowedBlocks))
                     ->count()
                 : 0;
             $hasLeftover = $pendingAfterTick > 0;
@@ -380,8 +440,10 @@ final class StepDispatcher
     /**
      * Dispatch runnable priority work before cleanup gets an opportunity to
      * end the tick. Returns the number of successfully claimed steps.
+     *
+     * @param  list<string>|null  $allowedBlocks  Cooldown filter; null when not cooling down.
      */
-    private static function dispatchPrioritySteps(?string $group): int
+    private static function dispatchPrioritySteps(?string $group, ?array $allowedBlocks): int
     {
         $prioritySteps = Step::pending()
             ->forGroup($group)
@@ -390,6 +452,7 @@ final class StepDispatcher
                 $query->whereNull('dispatch_after')
                     ->orWhere('dispatch_after', '<=', now());
             })
+            ->when($allowedBlocks !== null, static fn ($query) => $query->whereIn('block_uuid', $allowedBlocks))
             ->orderBy('id')
             ->get();
 

@@ -1,5 +1,13 @@
 # step-dispatcher
 
+## Changes in v1.21.0
+
+Cooldown mode: `StepDispatcher::cooldown()` stops new top-level blocks from
+starting, globally or for one table set, while blocks that already started run
+to the end, children included. New steps are still accepted and wait as
+Pending. `warmup()` resumes dispatch; `isInCoolDown()` and `isCooledDown()`
+report progress. Run the new `steps_cooldowns` migration. See [Cooldown](#cooldown).
+
 ## Changes in v1.20.9
 
 Stale-worker recovery processes multiple stalled Steps without crashing after
@@ -41,6 +49,7 @@ Step::create() -> Pending -> Dispatched -> Running -> Completed
 | Dispatch coordination | Seeded groups, atomic group locks and step claims, priority dispatch, and a normal-candidate cap |
 | Queue routing | Creation defaults plus an optional resolver called on each asynchronous dispatch attempt |
 | Isolation | Four tables per prefix, scoped runtime context, separate activity flags and dispatcher cache keys |
+| Cooldown | Hold new top-level blocks before a deploy while started blocks finish, globally or per prefix |
 | Operations | Stale-worker recovery, dispatched recovery, lock release, progress alerts, archive and purge commands |
 | Observation | Workflow status, tick retention filters, slow-tick callbacks, and best-effort cache counters |
 
@@ -551,6 +560,32 @@ seeds groups when it creates the dispatcher table. It is an installer, not a
 schema upgrade/backfill tool or one all-or-nothing transaction. Keep existing
 prefixed schemas aligned when upgrading. Diagnostic step log folders contain
 only the numeric step ID and are not isolated by prefix.
+
+## Cooldown
+
+```php
+use StepDispatcher\Support\StepDispatcher;
+
+StepDispatcher::cooldown();           // every table set
+StepDispatcher::cooldown('trading');  // only trading_ tables
+StepDispatcher::isInCoolDown();       // held, started work still finishing
+StepDispatcher::isCooledDown();       // held, nothing started left: safe to deploy
+StepDispatcher::warmup();             // resume everything
+```
+
+During a cooldown new steps are accepted and stay `Pending`. A top-level block
+(steps whose `block_uuid` is no step's `child_block_uuid`) that has not started
+does not start. A top-level block that started is atomic: its remaining steps
+and every child or grandchild block still run. Cascades and parent completion
+never pause. Priority steps follow the same rule.
+
+A scope is a prefix (`''` is the default set). A global warmup ends every
+cooldown; a scope warmup ends only that scope's own cooldown. Cooldowns live in
+the shared, unprefixed `steps_cooldowns` table, so every server sees them. A
+host that has not migrated yet keeps dispatching normally.
+
+Nothing needs configuring. A project that never calls `cooldown()` dispatches
+exactly as before, and is never held, even when the cooldown lookup fails.
 
 ## Commands
 

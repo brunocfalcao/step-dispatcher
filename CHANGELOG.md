@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.0 - 2026-10-20
+
+### Added
+- Cooldown mode. `StepDispatcher::cooldown(?string $scope)` holds new top-level
+  blocks globally or for one table prefix; blocks that already started run to
+  the end, descendants included. New steps are still created and stay Pending.
+  `warmup(?string $scope)` resumes dispatch. `isCooldownActive()`,
+  `isInCoolDown()` and `isCooledDown()` report the state.
+- `steps_cooldowns` migration (shared, unprefixed) and the `StepsCooldown` model.
+
+### Changed
+- The dispatcher tick filters priority and normal dispatch to started trees
+  while a cooldown holds its prefix. Without a cooldown the tick is unchanged
+  apart from one indexed lookup. A tick looks again before handing out normal
+  steps. An unreadable cooldown state holds new work for that tick only when
+  the last look found a cooldown in force for that scope (or everything); a
+  host that never cools down is never held. Hosts without the migration pay
+  one table check a minute.
+- `isInCoolDown()` stays true while a tick that began before the cooldown is
+  still running.
+- `steps:recover-stale --watchdog-progress` raises no no-progress alarm for a
+  prefix held by a cooldown.
+
 ## 1.20.9 - 2026-10-18
 
 ### Fixed
