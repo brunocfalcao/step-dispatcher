@@ -1,5 +1,15 @@
 # step-dispatcher
 
+## Changes in v1.21.2
+
+The dispatcher stays awake until a failed block's resolve-exception step has
+been promoted, so recovery steps run right after the failure. The minute-level
+`steps:recover-stale` sweep re-sets the wake flag when active work exists but
+the dispatcher sleeps. A failed step keeps its real error instead of an
+earlier stale-detector retry note.
+
+No migration or environment key is added.
+
 ## Changes in v1.21.1
 
 An older dispatcher tick cannot release or complete its replacement. The

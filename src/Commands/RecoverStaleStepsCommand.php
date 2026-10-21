@@ -20,6 +20,7 @@ use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\BaseCommand;
 use StepDispatcher\Support\Cooldown;
+use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Support\Steps;
 
 /**
@@ -84,7 +85,22 @@ final class RecoverStaleStepsCommand extends BaseCommand
 
         $this->recoverStaleRunningSteps();
 
+        $this->reassertWakeFlag();
+
         return self::SUCCESS;
+    }
+
+    /**
+     * Self-heal a sleeping dispatcher that still owns work. Rows can become
+     * active without passing through the creation observer (bulk state
+     * updates, an idle finalizer racing an older release), and nothing else
+     * would ever set the flag again for them.
+     */
+    private function reassertWakeFlag(): void
+    {
+        if (! StepDispatcher::isActive() && StepDispatcher::hasActiveSteps()) {
+            StepDispatcher::activate();
+        }
     }
 
     // ========================================================================

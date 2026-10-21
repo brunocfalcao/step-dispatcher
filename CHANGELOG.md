@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.2 - 2026-10-22
+
+### Fixed
+- The dispatcher no longer goes to sleep while a failed block still has a
+  resolve-exception step waiting to be promoted. The idle check counts such a
+  step as active work when a tick of its group can promote it, so the step
+  that closes a failed workflow runs straight away instead of waiting for
+  unrelated work to wake the dispatcher.
+- `steps:recover-stale` sets the wake flag again when the dispatcher sleeps
+  while active steps exist, so a missed wake-up heals within a minute.
+- A step that fails after a stale-detector requeue records its own error. The
+  "retrying" note the detector left no longer hides the real failure; a
+  message the job wrote itself is still kept.
+
 ## 1.21.1 - 2026-10-22
 
 ### Fixed

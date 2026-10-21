@@ -29,7 +29,10 @@ trait HandlesStepExceptions
 
         $parser = ExceptionParser::with($e);
 
-        if (is_null($this->step->error_message)) {
+        // A stale-detector requeue note only says an earlier attempt
+        // stalled; the failure of this attempt is the error worth keeping.
+        // A message the job wrote itself still wins.
+        if (is_null($this->step->error_message) || self::isRequeueNote($this->step->error_message)) {
             $this->step->update([
                 'error_message' => $parser->friendlyMessage(),
                 'error_stack_trace' => $parser->stackTrace(),
@@ -38,6 +41,12 @@ trait HandlesStepExceptions
 
         $this->finalizeDuration();
         $this->step->state->transitionTo(Failed::class);
+    }
+
+    private static function isRequeueNote(string $message): bool
+    {
+        return str_starts_with($message, 'Recovered by stale detector:')
+            && str_contains($message, ', retrying (');
     }
     // ========================================================================
     // MAIN EXCEPTION HANDLER

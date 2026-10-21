@@ -173,6 +173,38 @@ final class StepDispatcher
     public static function hasActiveSteps(): bool
     {
         return Step::whereIn('state', [Pending::class, Dispatched::class, Running::class])
+            ->exists()
+            || self::hasDormantResolversAwaitingPromotion();
+    }
+
+    /**
+     * A resolve-exception step still NotRunnable in a block whose ordinary
+     * step failed or stopped. Promotion is a cleanup phase of a later tick,
+     * so this is work the dispatcher still owes: sleeping here leaves the
+     * failed workflow unresolved until unrelated work wakes it. Only rows a
+     * group tick can promote count (same group, or both global).
+     */
+    private static function hasDormantResolversAwaitingPromotion(): bool
+    {
+        $table = Step::tableName();
+
+        return Step::query()
+            ->from($table.' as resolver')
+            ->where('resolver.type', 'resolve-exception')
+            ->where('resolver.state', NotRunnable::class)
+            ->whereExists(static function ($query) use ($table): void {
+                $query->selectRaw('1')
+                    ->from($table.' as failing')
+                    ->whereColumn('failing.block_uuid', 'resolver.block_uuid')
+                    ->where('failing.type', '<>', 'resolve-exception')
+                    ->whereIn('failing.state', Step::failedStepStates())
+                    ->where(static function ($group): void {
+                        $group->whereColumn('failing.group', 'resolver.group')
+                            ->orWhere(static function ($global): void {
+                                $global->whereNull('failing.group')->whereNull('resolver.group');
+                            });
+                    });
+            })
             ->exists();
     }
 

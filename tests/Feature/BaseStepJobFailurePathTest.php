@@ -130,3 +130,32 @@ it('does not escalate a zero-retry job to high priority before any retry', funct
 
     expect($method->invoke($job))->toBeFalse();
 });
+
+it('records the real error over a stale-detector retry note', function (): void {
+    $step = makeFailureStep(Running::class);
+    DB::table(Step::tableName())->where('id', $step->id)->update([
+        'error_message' => 'Recovered by stale detector: Dispatched payload stalled, retrying (0/3)',
+    ]);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+
+    $job->reportAndFail(new RuntimeException('value too long for type character varying(255)'));
+
+    $fresh = $step->fresh();
+    expect($fresh->state)->toBeInstanceOf(Failed::class)
+        ->and($fresh->error_message)->toContain('value too long')
+        ->and($fresh->error_stack_trace)->not->toBeEmpty();
+});
+
+it('keeps a message the job wrote itself before failing', function (): void {
+    $step = makeFailureStep(Running::class);
+    DB::table(Step::tableName())->where('id', $step->id)->update(['error_message' => 'Order 42 was rejected by the exchange']);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+
+    $job->reportAndFail(new RuntimeException('generic wrapper'));
+
+    expect($step->fresh()->error_message)->toBe('Order 42 was rejected by the exchange');
+});
