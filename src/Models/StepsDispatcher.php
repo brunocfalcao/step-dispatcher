@@ -25,6 +25,9 @@ final class StepsDispatcher extends BaseModel
 
     protected static ?Closure $slowDispatchCallable = null;
 
+    /** @var array<string, int> Acquisitions owned by this process, for legacy paired callers. */
+    private static array $ownedTicks = [];
+
     protected $casts = [
         'can_dispatch' => 'boolean',
         'last_tick_completed' => 'datetime',
@@ -144,8 +147,9 @@ final class StepsDispatcher extends BaseModel
     /**
      * Acquire a per-group lock (creates the group row if missing), open a tick, and record linkage.
      */
-    public static function startDispatch(?string $group = null): bool
+    public static function startDispatch(?string $group = null, ?int &$tickId = null): bool
     {
+        $tickId = null;
         try {
             $dispatcher = self::query()
                 ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
@@ -169,7 +173,7 @@ final class StepsDispatcher extends BaseModel
             return false;
         }
 
-        return DB::transaction(static function () use ($dispatcher, $group) {
+        $acquired = DB::transaction(static function () use ($dispatcher, $group, &$tickId) {
             // Acquire the dispatch lock with a single atomic UPDATE that also
             // reclaims stale locks. The WHERE matches two paths:
             //   • lock is currently free (can_dispatch = true) — normal acquire
@@ -216,73 +220,95 @@ final class StepsDispatcher extends BaseModel
                     'updated_at' => now(),
                 ]);
 
+            $tickId = (int) $tick->id;
+
             return true;
         });
+
+        if ($acquired) {
+            self::$ownedTicks[json_encode([self::cacheKeyPrefix(), $group])] = $tickId;
+        }
+
+        return $acquired;
     }
 
     /**
      * Finalize the current tick for this group, stamp completion, and release the per-group lock.
      */
-    public static function endDispatch(int $progress = 0, ?string $group = null): void
+    public static function endDispatch(int $progress = 0, ?string $group = null, ?int $expectedTickId = null): void
     {
-        $dispatcher = self::query()
-            ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
-            ->orderBy('id')
-            ->first();
-
-        if (! $dispatcher) {
+        $ownerKey = json_encode([self::cacheKeyPrefix(), $group]);
+        $expectedTickId ??= self::$ownedTicks[$ownerKey] ?? null;
+        if ($expectedTickId === null) {
             return;
         }
 
-        $completedAt = now();
-        $tickId = $dispatcher->current_tick_id;
+        DB::transaction(static function () use ($progress, $group, $expectedTickId): void {
+            $dispatcher = self::query()
+                ->when($group !== null, static fn ($q) => $q->where('group', $group), static fn ($q) => $q->whereNull('group'))
+                ->where('current_tick_id', $expectedTickId)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->first();
 
-        if ($tickId) {
-            $tick = StepsDispatcherTicks::find($tickId);
+            if (! $dispatcher) {
+                return;
+            }
 
-            if ($tick) {
-                $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
-                $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
-                $durationMs = $startedAtFloat
-                    ? Timing::elapsedMs((float) $startedAtFloat)
-                    : 0;
+            $completedAt = now();
+            $tickId = $dispatcher->current_tick_id;
 
-                $tick->progress = $progress;
-                $tick->completed_at = $completedAt;
-                $tick->duration = $durationMs;
+            if ($tickId) {
+                $tick = StepsDispatcherTicks::find($tickId);
 
-                $callable = self::$recordTickWhenCallable;
+                if ($tick) {
+                    $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
+                    $startedAtFloat = Cache::pull("steps_dispatcher_tick_start:{$cacheSuffix}");
+                    $durationMs = $startedAtFloat
+                        ? Timing::elapsedMs((float) $startedAtFloat)
+                        : 0;
 
-                if ($callable !== null && ! $callable($tick)) {
-                    $tick->delete();
-                } else {
-                    $tick->save();
+                    $tick->progress = $progress;
+                    $tick->completed_at = $completedAt;
+                    $tick->duration = $durationMs;
 
-                    if ($durationMs > 0) {
-                        $warningThreshold = config('step-dispatcher.dispatch.warning_threshold_ms', 40000);
-                        $onSlowDispatch = self::$slowDispatchCallable
-                            ?? config('step-dispatcher.dispatch.on_slow_dispatch');
+                    $callable = self::$recordTickWhenCallable;
 
-                        if ($durationMs > $warningThreshold && is_callable($onSlowDispatch)) {
-                            $onSlowDispatch($durationMs);
+                    if ($callable !== null && ! $callable($tick)) {
+                        $tick->delete();
+                    } else {
+                        $tick->save();
+
+                        if ($durationMs > 0) {
+                            $warningThreshold = config('step-dispatcher.dispatch.warning_threshold_ms', 40000);
+                            $onSlowDispatch = self::$slowDispatchCallable
+                                ?? config('step-dispatcher.dispatch.on_slow_dispatch');
+
+                            if ($durationMs > $warningThreshold && is_callable($onSlowDispatch)) {
+                                $onSlowDispatch($durationMs);
+                            }
                         }
                     }
                 }
             }
+
+            DB::table(self::tableName())
+                ->where('id', $dispatcher->id)
+                ->update([
+                    'current_tick_id' => null,
+                    'can_dispatch' => true,
+                    'last_tick_completed' => $completedAt,
+                    'updated_at' => now(),
+                ]);
+
+            $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
+            Cache::forget("current_tick_id:{$cacheSuffix}");
+            Cache::forget("steps_dispatcher_tick_start:{$cacheSuffix}");
+        });
+
+        if ((self::$ownedTicks[$ownerKey] ?? null) === $expectedTickId) {
+            unset(self::$ownedTicks[$ownerKey]);
         }
-
-        DB::table(self::tableName())
-            ->where('id', $dispatcher->id)
-            ->update([
-                'current_tick_id' => null,
-                'can_dispatch' => true,
-                'last_tick_completed' => $completedAt,
-                'updated_at' => now(),
-            ]);
-
-        $cacheSuffix = self::cacheKeyPrefix().($group ?? 'global');
-        Cache::forget("current_tick_id:{$cacheSuffix}");
-        Cache::forget("steps_dispatcher_tick_start:{$cacheSuffix}");
     }
 
     public static function label(?string $group): string

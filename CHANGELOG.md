@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.1 - 2026-10-22
+
+### Fixed
+- An expired dispatcher tick cannot release or complete the newer tick that
+  replaced it. The acquired tick identity follows the normal dispatch lifecycle;
+  legacy paired calls retain their interface.
+- New work keeps its per-prefix active flag when idle finalization races with
+  creation, including creation inside a transaction that commits later.
+- Cancellation cleanup leaves running steps owned by their workers and reports
+  progress only after an allowed transition actually changes a step.
+- Tick retention preserves recent and boundary timestamps even when IDs are out
+  of time order. Callable retention visits every page while deleting earlier rows.
+
 ## 1.21.0 - 2026-10-20
 
 ### Added

@@ -175,7 +175,7 @@ final class PurgeStepsCommand extends BaseCommand
 
         StepsDispatcherTicks::query()
             ->orderBy('id')
-            ->chunk($chunkSize, function ($ticks) use ($callable, &$totalDeleted) {
+            ->chunkById($chunkSize, function ($ticks) use ($callable, &$totalDeleted) {
                 $idsToDelete = [];
 
                 foreach ($ticks as $tick) {
@@ -221,6 +221,7 @@ final class PurgeStepsCommand extends BaseCommand
                 ->where('id', '>', $currentId)
                 ->where('id', '<=', $currentId + $batchSize)
                 ->where('id', '<=', $maxId)
+                ->where('created_at', '<', $cutoff)
                 ->delete();
 
             $totalDeleted += $deleted;

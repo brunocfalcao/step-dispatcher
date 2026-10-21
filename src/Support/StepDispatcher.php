@@ -198,17 +198,13 @@ final class StepDispatcher
      */
     public static function activate(): void
     {
-        $dir = self::flagDir();
+        self::withFlagLock(static function (): void {
+            $flag = self::flagFilePath();
 
-        if (! is_dir($dir)) {
-            @mkdir($dir, 0o755, true);
-        }
-
-        $flag = self::flagFilePath();
-
-        if (! file_exists($flag)) {
-            @file_put_contents($flag, (string) time());
-        }
+            if (! file_exists($flag)) {
+                @file_put_contents($flag, (string) time());
+            }
+        });
     }
 
     /**
@@ -217,11 +213,9 @@ final class StepDispatcher
      */
     public static function deactivate(): void
     {
-        $flag = self::flagFilePath();
-
-        if (file_exists($flag)) {
-            @unlink($flag);
-        }
+        self::withFlagLock(static function (): void {
+            self::deactivateUnlocked();
+        }, LOCK_EX, createDirectory: false);
     }
 
     /**
@@ -229,7 +223,11 @@ final class StepDispatcher
      */
     public static function isActive(): bool
     {
-        return file_exists(self::flagFilePath());
+        return self::withFlagLock(
+            static fn (): bool => file_exists(self::flagFilePath()),
+            LOCK_SH,
+            createDirectory: false,
+        );
     }
 
     /**
@@ -240,7 +238,8 @@ final class StepDispatcher
     public static function dispatch(?string $group = null): void
     {
         // Acquire the DB lock authoritatively; bail if already running.
-        if (! StepsDispatcher::startDispatch($group)) {
+        $tickId = null;
+        if (! StepsDispatcher::startDispatch($group, $tickId)) {
             Step::logGlobal('dispatcher', sprintf(
                 'Tick skipped | group=%s | reason=lock_not_acquired',
                 $group ?? 'NULL'
@@ -421,7 +420,7 @@ final class StepDispatcher
                 $pendingSteps->pluck('block_uuid')->unique()->count(),
             ));
         } finally {
-            StepsDispatcher::endDispatch($progress, $group);
+            StepsDispatcher::endDispatch($progress, $group, $tickId);
 
             Step::logGlobal('dispatcher', sprintf(
                 'Tick finished | group=%s | progress=%d | duration_ms=%d',
@@ -430,10 +429,8 @@ final class StepDispatcher
                 Timing::elapsedMs($tickStartedAt),
             ));
 
-            // Check if any active steps remain; deactivate if idle
-            if (! self::hasActiveSteps()) {
-                self::deactivate();
-            }
+            // Check and deactivate under the same lock used by producers.
+            self::deactivateIfIdle();
         }
     }
 
@@ -699,7 +696,7 @@ final class StepDispatcher
     {
         $cancellationsOccurred = false;
         $stepsTable = Step::tableName();
-        $settledSuccessorStates = array_merge(Step::terminalStepStates(), [NotRunnable::class]);
+        $settledSuccessorStates = array_merge(Step::terminalStepStates(), [NotRunnable::class, Running::class]);
 
         // Select only failures that currently have an actionable successor.
         // Terminal history is permanent until archive, so loading every old
@@ -736,7 +733,7 @@ final class StepDispatcher
             $stepsToCancel = Step::where('block_uuid', $blockUuid)
                 ->forGroup($group)
                 ->where('index', '>', $failedStep->index)
-                ->whereNotIn('state', array_merge(Step::terminalStepStates(), [NotRunnable::class]))
+                ->whereNotIn('state', array_merge(Step::terminalStepStates(), [NotRunnable::class, Running::class]))
                 ->where('type', 'default')
                 ->get();
 
@@ -762,8 +759,8 @@ final class StepDispatcher
             }
 
             if (! empty($stepIdsToCancel)) {
-                self::batchTransitionSteps($stepIdsToCancel, Cancelled::class);
-                $cancellationsOccurred = true;
+                $changed = self::batchTransitionSteps($stepIdsToCancel, Cancelled::class);
+                $cancellationsOccurred = $changed > 0 || $cancellationsOccurred;
 
                 // Cancel child blocks
                 foreach ($parentSteps as $parentStep) {
@@ -866,7 +863,7 @@ final class StepDispatcher
                     ->selectRaw('1')
                     ->from($stepsTable.' as actionable_children')
                     ->whereColumn('actionable_children.block_uuid', $stepsTable.'.child_block_uuid')
-                    ->whereNotIn('actionable_children.state', Step::terminalStepStates());
+                    ->whereIn('actionable_children.state', [Pending::class, Dispatched::class, NotRunnable::class]);
 
                 if ($group === null) {
                     $query->whereNull('actionable_children.group');
@@ -885,7 +882,7 @@ final class StepDispatcher
 
             $nonTerminalChildIds = Step::where('block_uuid', $childBlock)
                 ->forGroup($group)
-                ->whereNotIn('state', Step::terminalStepStates())
+                ->whereIn('state', [Pending::class, Dispatched::class, NotRunnable::class])
                 ->pluck('id')
                 ->all();
 
@@ -893,9 +890,9 @@ final class StepDispatcher
                 continue;
             }
 
-            self::batchTransitionSteps($nonTerminalChildIds, Cancelled::class);
-
-            return true; // end tick after cancelling one block
+            if (self::batchTransitionSteps($nonTerminalChildIds, Cancelled::class) > 0) {
+                return true; // end tick only after actual progress
+            }
         }
 
         return false;
@@ -1288,6 +1285,90 @@ final class StepDispatcher
         $prefix = app(RuntimeContext::class)->current();
 
         return self::flagDir().'/'.$prefix.'active.flag';
+    }
+
+    /**
+     * Resolve the per-prefix lock that coordinates flag producers and the
+     * idle finalizer. The lock file remains in place; only the active flag is
+     * removed when a dispatcher goes idle.
+     */
+    private static function flagLockPath(): string
+    {
+        $prefix = app(RuntimeContext::class)->current();
+
+        return self::flagDir().'/'.$prefix.'active.flag.lock';
+    }
+
+    /**
+     * Run a flag operation while holding the per-prefix filesystem lock.
+     *
+     * @template T
+     *
+     * @param  callable(): T  $callback
+     * @return T
+     */
+    private static function withFlagLock(
+        callable $callback,
+        int $lockMode = LOCK_EX,
+        bool $createDirectory = true,
+    ): mixed {
+        $dir = self::flagDir();
+
+        if (! is_dir($dir)) {
+            if (! $createDirectory) {
+                return $callback();
+            }
+
+            if (! @mkdir($dir, 0o755, true) && ! is_dir($dir)) {
+                throw new RuntimeException("Unable to create step-dispatcher flag directory [{$dir}].");
+            }
+        }
+
+        $handle = @fopen(self::flagLockPath(), 'c');
+
+        if ($handle === false) {
+            throw new RuntimeException('Unable to open the step-dispatcher flag lock.');
+        }
+
+        try {
+            if (! @flock($handle, $lockMode)) {
+                throw new RuntimeException('Unable to lock the step-dispatcher active flag.');
+            }
+
+            return $callback();
+        } finally {
+            @flock($handle, LOCK_UN);
+            fclose($handle);
+        }
+    }
+
+    /**
+     * Deactivate without acquiring the lock. Callers must already hold it.
+     */
+    private static function deactivateUnlocked(): void
+    {
+        $flag = self::flagFilePath();
+
+        if (file_exists($flag)) {
+            @unlink($flag);
+        }
+    }
+
+    /**
+     * Recheck the database and remove the flag only while producers are
+     * excluded by the same per-prefix lock.
+     */
+    private static function deactivateIfIdle(): void
+    {
+        if (! is_dir(self::flagDir())) {
+            return;
+        }
+
+        self::withFlagLock(static function (): void {
+            if (! self::hasActiveSteps()) {
+                self::deactivateUnlocked();
+            }
+        }, LOCK_EX, createDirectory: false);
     }
 
     /**

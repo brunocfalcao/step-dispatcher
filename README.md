@@ -1,5 +1,18 @@
 # step-dispatcher
 
+## Changes in v1.21.1
+
+An older dispatcher tick cannot release or complete its replacement. The
+optional acquired tick ID can be passed from `startDispatch()` to
+`endDispatch()`; existing paired calls remain supported. Per-prefix flag
+locks coordinate work creation and idle cleanup, with activation reasserted
+after a transaction commits. Cancellation cleanup reports only actual allowed
+transitions and leaves running work to its worker. Tick retention checks the
+cutoff on every deletion and visits every callable-filter page.
+
+No migration or environment key is added. Restart consuming dispatchers and
+workers together when moving a shared package checkout to this version.
+
 ## Changes in v1.21.0
 
 Cooldown mode: `StepDispatcher::cooldown()` stops new top-level blocks from

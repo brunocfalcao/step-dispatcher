@@ -10,7 +10,9 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\Support\RuntimeContext;
 use StepDispatcher\Support\StepDispatcher;
+use StepDispatcher\Support\Steps;
 
 final class StepObserver
 {
@@ -245,6 +247,21 @@ final class StepObserver
     {
         // Activate the dispatcher when a new step is created
         StepDispatcher::activate();
+
+        // Eloquent fires `created` before an outer transaction commits. A
+        // finalizer can therefore observe no committed active row and clear
+        // the flag after this activation. Reassert it once the row is
+        // durable, preserving the prefix that owned the step.
+        $connection = $step->getConnection();
+        if ($connection->transactionLevel() > 0) {
+            $prefix = app(RuntimeContext::class)->current();
+
+            $connection->afterCommit(static function () use ($prefix): void {
+                Steps::usingPrefix($prefix, static function (): void {
+                    StepDispatcher::activate();
+                });
+            });
+        }
 
         // Seed the step's diagnostic log folder with a creation marker. The
         // log trait early-returns when logging is disabled, so this is a
