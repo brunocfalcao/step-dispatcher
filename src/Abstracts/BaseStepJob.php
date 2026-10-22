@@ -298,6 +298,29 @@ abstract class BaseStepJob implements ShouldQueue
 
     protected function prepareJobExecution(): bool
     {
+        // The start is a claim: the row stays locked from the state read to
+        // the Running save, so a canceller that changes the state in between
+        // either lands first (and the guards below see it) or waits and then
+        // finds the step already Running. Never both.
+        $started = $this->step->getConnection()->transaction(fn (): bool => $this->claimStart());
+
+        if (! $started) {
+            return false;
+        }
+
+        $this->startDuration();
+        $this->attachRelatable();
+
+        // Initialize database exception handler (auto-detect DB driver)
+        $this->databaseExceptionHandler = BaseDatabaseExceptionHandler::make();
+
+        return true;
+    }
+
+    private function claimStart(): bool
+    {
+        Step::query()->whereKey($this->step->getKey())->lockForUpdate()->first(['id']);
+
         // Refresh step from database to get latest state (it should be Dispatched)
         $this->step->refresh();
 
@@ -320,11 +343,6 @@ abstract class BaseStepJob implements ShouldQueue
         }
 
         $this->step->state->transitionTo(Running::class);
-        $this->startDuration();
-        $this->attachRelatable();
-
-        // Initialize database exception handler (auto-detect DB driver)
-        $this->databaseExceptionHandler = BaseDatabaseExceptionHandler::make();
 
         return true;
     }

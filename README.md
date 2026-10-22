@@ -1,5 +1,13 @@
 # step-dispatcher
 
+## Changes in v1.21.4
+
+A Step job now claims its start under a row lock: the terminal and Running
+checks and the transition to Running happen in one short transaction, so two
+workers that receive the same Step cannot both start it, and a Step stopped or
+cancelled at that moment is not run. Duration tracking, relatable attachment
+and exception handling run after the claim commits.
+
 ## Changes in v1.21.3
 
 Dispatched recovery preserves Steps whose Redis payload is still pending,

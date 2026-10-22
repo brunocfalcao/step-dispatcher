@@ -5,7 +5,9 @@ declare(strict_types=1);
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
@@ -137,4 +139,34 @@ it('bails out without double-executing when the step is already Running', functi
 
     expect($fresh->state)->toBeInstanceOf(Running::class)
         ->and(GuardedTestJob::$computeRuns)->toBe(0);
+});
+
+it('does not start a step that was cancelled after the worker read it as dispatched', function (): void {
+    $step = guardedStep(Dispatched::class);
+    $cancelled = false;
+
+    // A canceller commits between the worker's read of the step and its start.
+    DB::listen(function ($query) use ($step, &$cancelled): void {
+        if (! $cancelled && str_starts_with(strtolower($query->sql), 'select') && str_contains($query->sql, 'from "'.Step::tableName().'"')) {
+            $cancelled = true;
+            DB::table(Step::tableName())->where('id', $step->id)
+                ->whereIn('state', [Pending::class, Dispatched::class])
+                ->update(['state' => Cancelled::class, 'completed_at' => now()]);
+        }
+    });
+
+    $fresh = runGuarded($step);
+
+    expect($cancelled)->toBeTrue()
+        ->and($fresh->state)->toBeInstanceOf(Cancelled::class)
+        ->and($fresh->started_at)->toBeNull()
+        ->and(GuardedTestJob::$computeRuns)->toBe(0);
+});
+
+it('still starts and completes a dispatched step that nobody cancelled', function (): void {
+    $fresh = runGuarded(guardedStep(Dispatched::class));
+
+    expect($fresh->state)->toBeInstanceOf(Completed::class)
+        ->and($fresh->started_at)->not->toBeNull()
+        ->and(GuardedTestJob::$computeRuns)->toBe(1);
 });

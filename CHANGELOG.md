@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.4 - 2026-10-22
+
+### Fixed
+- Two workers receiving the same Step can no longer both start it. The start
+  claim (terminal and Running guards plus the Running transition) runs under a
+  row lock in one transaction; a Step that became terminal concurrently is
+  skipped.
+
 ## 1.21.3 - 2026-10-22
 
 ### Fixed
