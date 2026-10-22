@@ -6,8 +6,10 @@ use Illuminate\Support\Facades\DB;
 use Spatie\ModelStates\Exceptions\CouldNotPerformTransition;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\States\Stopped;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
 use StepDispatcher\Tests\Fixtures\SpawningParentTestJob;
@@ -82,6 +84,24 @@ it('completes a parent once all children are concluded', function (): void {
 
     expect($parent->fresh()->state)->toBeInstanceOf(Completed::class);
 });
+
+it('does not complete a parent when a child fails between outcome propagation and completion', function (string $outcome): void {
+    $parent = makeRunningParentWithChild(Pending::class);
+    expect(StepDispatcher::transitionParentsToFailed('test-group'))->toBeFalse();
+    expect(StepDispatcher::transitionParentsToStopped('test-group'))->toBeFalse();
+    DB::table(Step::tableName())->where('block_uuid', $parent->child_block_uuid)->update(['state' => $outcome]);
+
+    expect(StepDispatcher::transitionParentsToComplete('test-group'))->toBeFalse();
+    expect($parent->refresh()->state)->toBeInstanceOf(Running::class);
+    expect(fn () => $parent->state->transitionTo(Completed::class))->toThrow(CouldNotPerformTransition::class);
+
+    if ($outcome === Failed::class) {
+        StepDispatcher::transitionParentsToFailed('test-group');
+    } else {
+        StepDispatcher::transitionParentsToStopped('test-group');
+    }
+    expect($parent->refresh()->state::class)->toBe($outcome);
+})->with([Failed::class, Stopped::class]);
 
 it('leaves a spawning parent Running after its job run, without throwing', function (): void {
     $parent = Step::create([

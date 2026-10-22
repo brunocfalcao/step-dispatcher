@@ -303,7 +303,7 @@ trait HandlesStepLifecycle
      */
     protected function parentMustAwaitChildren(): bool
     {
-        return $this->step->isParent() && ! $this->step->childStepsAreConcluded();
+        return $this->step->isParent() && ! $this->step->childStepsAreConcluded(forCompletion: true);
     }
 
     // ========================================================================

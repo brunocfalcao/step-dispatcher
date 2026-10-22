@@ -7,11 +7,14 @@ namespace StepDispatcher\Models;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Spatie\ModelStates\HasStates;
 use StepDispatcher\Abstracts\BaseModel;
 use StepDispatcher\Abstracts\StepStatus;
 use StepDispatcher\Concerns\Step\HasActions;
 use StepDispatcher\Concerns\Step\HasStepLogging;
+use StepDispatcher\Database\Factories\StepFactory;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
@@ -22,6 +25,7 @@ use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Support\RuntimeContext;
+use StepDispatcher\Support\Steps;
 
 /**
  * @property int $id
@@ -43,16 +47,16 @@ use StepDispatcher\Support\RuntimeContext;
  * @property string $priority
  * @property array|null $arguments
  * @property int $retries
- * @property \Illuminate\Support\Carbon|null $dispatch_after
- * @property \Illuminate\Support\Carbon|null $started_at
- * @property \Illuminate\Support\Carbon|null $completed_at
+ * @property Carbon|null $dispatch_after
+ * @property Carbon|null $started_at
+ * @property Carbon|null $completed_at
  * @property int $duration
  * @property string|null $hostname
  * @property bool $was_notified
  * @property string|null $workflow_id
  * @property string|null $canonical
- * @property \Illuminate\Support\Carbon $created_at
- * @property \Illuminate\Support\Carbon $updated_at
+ * @property Carbon $created_at
+ * @property Carbon $updated_at
  * @property-read string|null $group
  */
 final class Step extends BaseModel
@@ -101,7 +105,7 @@ final class Step extends BaseModel
     public static function prefix(string $prefix): Builder
     {
         $instance = new self;
-        $instance->setTable(\StepDispatcher\Support\Steps::normalise($prefix).'steps');
+        $instance->setTable(Steps::normalise($prefix).'steps');
 
         return $instance->newQuery();
     }
@@ -371,7 +375,7 @@ final class Step extends BaseModel
         return $this->hasMany(self::class, 'block_uuid', 'child_block_uuid');
     }
 
-    public function childStepsAreConcludedFromMap($childStepsByBlock): bool
+    public function childStepsAreConcludedFromMap($childStepsByBlock, bool $forCompletion = false): bool
     {
         $children = $childStepsByBlock[$this->child_block_uuid]
         ?? (method_exists($childStepsByBlock, 'get') ? $childStepsByBlock->get($this->child_block_uuid) : null);
@@ -380,7 +384,7 @@ final class Step extends BaseModel
             return false;
         }
 
-        if (! $children instanceof \Illuminate\Support\Collection) {
+        if (! $children instanceof Collection) {
             $children = collect($children);
         }
 
@@ -391,21 +395,18 @@ final class Step extends BaseModel
                 continue;
             }
 
-            // A parent is ready to leave Running once every child reaches a
-            // terminal state — Completed, Skipped, Cancelled, Failed, or
-            // Stopped. Failed/Stopped cascades are handled by their own
-            // parent-resolution passes BEFORE this method is consulted, so
-            // by the time we reach here in `transitionParentsToComplete`,
-            // any Failed/Stopped outcome has already moved the parent to
-            // its matching terminal state. The only remaining case this
-            // method decides on is Cancelled-or-concluded — and for that,
-            // "child is in a terminal state" is the right signal.
+            // A child can fail after the failure sweep. Completion must
+            // still wait for its Failed/Stopped outcome to propagate.
+            if ($forCompletion && in_array($stateClass, [Failed::class, Stopped::class], true)) {
+                return false;
+            }
+
             if (! in_array($stateClass, self::terminalStepStates(), strict: true)) {
                 return false;
             }
 
             if ($child->isParent()) {
-                $recurse = $child->childStepsAreConcludedFromMap($childStepsByBlock);
+                $recurse = $child->childStepsAreConcludedFromMap($childStepsByBlock, $forCompletion);
                 if (! $recurse) {
                     return false;
                 }
@@ -415,7 +416,7 @@ final class Step extends BaseModel
         return true;
     }
 
-    public function childStepsAreConcluded(): bool
+    public function childStepsAreConcluded(bool $forCompletion = false): bool
     {
         $children = $this->childSteps()->get();
 
@@ -428,13 +429,15 @@ final class Step extends BaseModel
                 continue;
             }
 
-            // See `childStepsAreConcludedFromMap` for the rationale on
-            // using terminalStepStates() here instead of concluded-only.
+            if ($forCompletion && in_array(get_class($child->state), [Failed::class, Stopped::class], true)) {
+                return false;
+            }
+
             if (! in_array(get_class($child->state), self::terminalStepStates(), strict: true)) {
                 return false;
             }
 
-            if ($child->isParent() && ! $child->childStepsAreConcluded()) {
+            if ($child->isParent() && ! $child->childStepsAreConcluded($forCompletion)) {
                 return false;
             }
         }
@@ -451,6 +454,6 @@ final class Step extends BaseModel
 
     protected static function newFactory()
     {
-        return \StepDispatcher\Database\Factories\StepFactory::new();
+        return StepFactory::new();
     }
 }

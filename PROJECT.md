@@ -33,6 +33,15 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
   retry transitions clear the persisted start timestamp. Recovery must process
   multiple stalled Steps without dereferencing the reset timestamp.
 
+- Dispatched recovery inspects pending, delayed and reserved Redis payloads
+  when the driver supports inspection. A payload still present in its worker
+  lane retains its Step's state and retries. Inspection never restores jobs or
+  models, matches the runtime table prefix, and defers recovery when Redis or
+  a Step payload cannot be inspected. Other drivers retain their existing path.
+- Parent completion rechecks failed/stopped descendants even after the
+  failure-propagation pass, including completion from the job lifecycle. A
+  concurrent child failure must propagate before downstream work can advance.
+
 - Cooldown (`src/Support/Cooldown.php`) holds unstarted top-level blocks and
   never pauses bookkeeping. A started top-level block is atomic, descendants
   included. "Started" survives a return to Pending through `tick_id`,

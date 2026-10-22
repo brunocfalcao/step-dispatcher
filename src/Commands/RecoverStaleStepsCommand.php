@@ -4,12 +4,17 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Commands;
 
+use Illuminate\Contracts\Database\ModelIdentifier;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Queue\RedisQueue;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Queue;
 use ReflectionClass;
 use ReflectionException;
+use RuntimeException;
 use StepDispatcher\Abstracts\BaseStepJob;
 use StepDispatcher\Events\StaleStepsDetected;
 use StepDispatcher\Models\Step;
@@ -20,8 +25,10 @@ use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Support\BaseCommand;
 use StepDispatcher\Support\Cooldown;
+use StepDispatcher\Support\RuntimeContext;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Support\Steps;
+use Throwable;
 
 /**
  * Consolidated stall-recovery command.
@@ -315,10 +322,11 @@ final class RecoverStaleStepsCommand extends BaseCommand
         // update refreshes updated_at; reusing the stale-time query afterward
         // would therefore select zero rows and postpone the actual requeue
         // until a later watchdog pass.
-        $staleIds = Step::query()
+        $candidates = Step::query()
             ->where('state', Dispatched::class)
             ->where('updated_at', '<', $staleThreshold)
-            ->pluck('id');
+            ->get(['id', 'queue', 'class']);
+        $staleIds = $this->withoutQueuedPayloads($candidates)->pluck('id');
         $count = $staleIds->count();
 
         if ($count === 0) {
@@ -399,6 +407,71 @@ final class RecoverStaleStepsCommand extends BaseCommand
                 'hostname' => gethostname(),
             ],
         );
+    }
+
+    /**
+     * A waiting Redis payload is backlog, not a lost dispatch. Inspect each
+     * worker lane once; never restore a job or its models while inspecting it.
+     * Drivers without payload inspection retain their existing recovery path.
+     *
+     * @param  Collection<int, Step>  $candidates
+     * @return Collection<int, Step>
+     */
+    private function withoutQueuedPayloads(Collection $candidates): Collection
+    {
+        if ($candidates->isEmpty()) {
+            return $candidates;
+        }
+
+        try {
+            $connection = Queue::connection();
+        } catch (Throwable $e) {
+            Log::warning('Dispatched recovery deferred: queue inspection unavailable', ['exception' => $e::class]);
+
+            return collect();
+        }
+
+        if (! $connection instanceof RedisQueue || ! method_exists($connection, 'pendingJobs')) {
+            return $candidates;
+        }
+
+        $prefix = app(RuntimeContext::class)->current();
+
+        return $candidates->groupBy('queue')->flatMap(function (Collection $steps, string $queue) use ($connection, $prefix): Collection {
+            $queuedIds = [];
+            $stepClasses = $steps->pluck('class')->all();
+
+            try {
+                foreach (['pendingJobs', 'delayedJobs', 'reservedJobs'] as $method) {
+                    foreach ($connection->{$method}($queue) as $job) {
+                        $payload = $job->payload;
+                        $class = $payload['data']['commandName'] ?? '';
+                        if (! in_array($class, $stepClasses, true) && ! is_a($class, BaseStepJob::class, true)) {
+                            continue;
+                        }
+
+                        $command = $payload['data']['command'] ?? null;
+                        // No __wakeup, __unserialize, model lookup or job code may run here.
+                        $values = is_string($command) ? (array) @unserialize($command, ['allowed_classes' => false]) : [];
+                        $step = (array) ($values['step'] ?? []);
+                        if (($step['__PHP_Incomplete_Class_Name'] ?? null) !== ModelIdentifier::class || ! isset($step['id'])) {
+                            throw new RuntimeException('Step payload cannot be inspected.');
+                        }
+
+                        if (Steps::normalise($values['stepPrefix'] ?? '') === $prefix) {
+                            $queuedIds[(string) $step['id']] = true;
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+                // An unavailable or opaque queue cannot prove a payload was lost.
+                Log::warning('Dispatched recovery deferred: queue payload inspection failed', ['queue' => $queue, 'exception' => $e::class]);
+
+                return collect();
+            }
+
+            return $steps->reject(fn (Step $step): bool => isset($queuedIds[(string) $step->id]));
+        })->values();
     }
 
     /**

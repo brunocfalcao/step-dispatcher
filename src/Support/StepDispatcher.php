@@ -535,7 +535,7 @@ final class StepDispatcher
 
         foreach ($runningParents as $step) {
             try {
-                $areConcluded = $step->childStepsAreConcludedFromMap($childStepsByBlock);
+                $areConcluded = $step->childStepsAreConcludedFromMap($childStepsByBlock, forCompletion: true);
 
                 if ($areConcluded) {
                     $step->state->transitionTo(Completed::class);

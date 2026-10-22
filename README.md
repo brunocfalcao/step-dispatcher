@@ -1,5 +1,20 @@
 # step-dispatcher
 
+## Changes in v1.21.3
+
+Dispatched recovery preserves Steps whose Redis payload is still pending,
+delayed or reserved. Queued backlog no longer spends the Step retry budget.
+Inspection matches the table prefix, never restores jobs or models, and
+waits when Redis or a Step payload cannot be inspected. Drivers without
+payload inspection retain their previous recovery behavior.
+
+Parent completion rechecks failed and stopped descendants so a child failure
+between dispatcher passes cannot complete its parent and release downstream
+work. General terminal-state queries keep their existing meaning.
+
+No migration or environment key is added. Release all shared-copy consumers
+in the same window and restart their dispatchers and workers.
+
 ## Changes in v1.21.2
 
 The dispatcher stays awake until a failed block's resolve-exception step has

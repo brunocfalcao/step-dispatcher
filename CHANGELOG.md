@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.3 - 2026-10-22
+
+### Fixed
+- Preserve dispatched Steps and retry budgets while their Redis payload remains
+  pending, delayed or reserved. Inspection is prefix-aware, does not restore
+  jobs or models, and defers recovery when payload inspection is unavailable.
+  Drivers without inspection retain their existing recovery path.
+- Prevent parents from completing when a descendant fails or stops between the
+  failure-propagation and completion passes, including job lifecycle completion.
+  General terminal-state queries retain their existing contract.
+
 ## 1.21.2 - 2026-10-22
 
 ### Fixed

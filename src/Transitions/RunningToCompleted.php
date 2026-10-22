@@ -28,7 +28,7 @@ final class RunningToCompleted extends Transition
      */
     public function canTransition(): bool
     {
-        return ! $this->step->isParent() || $this->step->childStepsAreConcluded();
+        return ! $this->step->isParent() || $this->step->childStepsAreConcluded(forCompletion: true);
     }
 
     public function handle(): Step
