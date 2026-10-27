@@ -128,7 +128,7 @@ final class InstallPrefixedTablesCommand extends BaseCommand
             $blueprint->tinyInteger('was_throttled')->default(0)->index();
             $blueprint->tinyInteger('is_throttled')->default(0)->index();
             $blueprint->string('priority', 20)->nullable()->index();
-            $blueprint->timestamp('dispatch_after')->nullable()->index();
+            $blueprint->timestamp('dispatch_after', 3)->nullable()->index();
             $blueprint->timestamp('started_at')->nullable();
             $blueprint->timestamp('completed_at')->nullable();
             $blueprint->bigInteger('duration')->default(0);
@@ -229,7 +229,7 @@ final class InstallPrefixedTablesCommand extends BaseCommand
             $blueprint->tinyInteger('was_throttled')->default(0);
             $blueprint->tinyInteger('is_throttled')->default(0);
             $blueprint->string('priority', 20)->nullable();
-            $blueprint->timestamp('dispatch_after')->nullable();
+            $blueprint->timestamp('dispatch_after', 3)->nullable();
             $blueprint->timestamp('started_at')->nullable();
             $blueprint->timestamp('completed_at')->nullable();
             $blueprint->bigInteger('duration')->default(0);

@@ -215,11 +215,29 @@ final class StepDispatcher
      */
     public static function activeGroups(): array
     {
+        $table = Step::tableName();
+
         return Step::query()
-            ->whereIn('state', [Pending::class, Dispatched::class, Running::class])
-            ->whereNotNull('group')
+            ->from($table.' as candidate')
+            ->whereNotNull('candidate.group')
+            ->where(static function ($query) use ($table): void {
+                $query->whereIn('candidate.state', [Pending::class, Dispatched::class, Running::class])
+                    ->orWhere(static function ($dormant) use ($table): void {
+                        $dormant
+                            ->where('candidate.type', 'resolve-exception')
+                            ->where('candidate.state', NotRunnable::class)
+                            ->whereExists(static function ($failed) use ($table): void {
+                                $failed->selectRaw('1')
+                                    ->from($table.' as failing')
+                                    ->whereColumn('failing.block_uuid', 'candidate.block_uuid')
+                                    ->where('failing.type', '<>', 'resolve-exception')
+                                    ->whereIn('failing.state', Step::failedStepStates())
+                                    ->whereColumn('failing.group', 'candidate.group');
+                            });
+                    });
+            })
             ->distinct()
-            ->pluck('group')
+            ->pluck('candidate.group')
             ->values()
             ->all();
     }

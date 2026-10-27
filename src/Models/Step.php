@@ -65,6 +65,14 @@ final class Step extends BaseModel
 
     protected $guarded = [];
 
+    /**
+     * Keep retry due times at the same millisecond precision as the
+     * dispatch_after schema. Second-format Eloquent serialization silently
+     * rounds a positive jobBackoffMs value before the worker can observe it.
+     * Older second-precision schemas safely truncate the fractional part.
+     */
+    protected $dateFormat = 'Y-m-d H:i:s.v';
+
     protected $casts = [
         'arguments' => 'array',
         'response' => 'array',

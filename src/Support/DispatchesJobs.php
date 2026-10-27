@@ -59,6 +59,15 @@ trait DispatchesJobs
             $job = self::instantiateJobWithArguments($step->class, $step->arguments);
             $job->step = $step;
 
+            // Keep the queue payload tied to the exact dispatch generation.
+            // retries alone is insufficient for throttle reschedules, which
+            // intentionally do not increment it; tick_id changes on every
+            // dispatcher pass and remains on the step row for failed().
+            $job->stepAttemptSnapshotAvailable = true;
+            $job->stepAttemptRetries = (int) $step->retries;
+            $job->stepAttemptTickId = $step->tick_id === null ? null : (int) $step->tick_id;
+            $job->stepAttemptStartedAt = $step->started_at?->format('Y-m-d H:i:s.u');
+
             // Stamp the ambient prefix onto the job payload so the
             // worker (which boots in a fresh process / scoped
             // container with an empty prefix stack) can restore the

@@ -90,6 +90,12 @@ it('does not count a dormant resolver whose block has no failure', function (): 
     expect(StepDispatcher::hasActiveSteps())->toBeFalse();
 });
 
+it('lists a named dormant resolver lane so a daemon can tick its promotion', function (): void {
+    makeFailedBlockWithDormantResolver('kappa', 'kappa');
+
+    expect(StepDispatcher::activeGroups())->toBe(['kappa']);
+});
+
 it('does not count a dormant resolver that no group tick can promote', function (): void {
     makeFailedBlockWithDormantResolver(failedGroup: 'kappa', resolverGroup: 'alpha');
 

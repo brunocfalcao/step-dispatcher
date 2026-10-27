@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.5 - 2026-10-27
+
+### Fixed
+- A queue-level `failed()` callback locks and re-reads the Step and fails it
+  only when it is still Running or Dispatched and still belongs to the same
+  dispatch generation (dispatch tick and retry count) that queued the job.
+  A late callback from an earlier attempt can no longer overwrite a newer
+  retry, a recovery or a terminal outcome. The job's `resolveException()`
+  hook runs only after the failure commits. Jobs queued before this version
+  carry no generation snapshot and keep the previous state-only check.
+- A job delivered after recovery re-queued its Step (a newer retry or
+  dispatch tick) no longer starts it; the newer dispatch runs the Step.
+- A resolve-exception Step is dispatched only when every parallel resolver of
+  the previous stage has concluded, not only the first one found.
+- `activeGroups()` includes a group whose remaining work is a dormant
+  resolver that a failed sibling in the same group can promote.
+- `steps:archive` and `steps:purge` keep a block live while its NotRunnable
+  resolver can still be promoted by a failed sibling in the same group.
+- A positive `jobBackoffMs` keeps millisecond precision: the Step model
+  writes dates with milliseconds and `steps:install --prefix` creates
+  millisecond `dispatch_after` columns. Older second-precision prefixed
+  tables still drop the fraction until the host upgrades them.
+
+### Changed
+- The package `StepFactory` leaves `class` unset and defaults `queue` to
+  `default`. Tests that dispatch a factory row must set the application's
+  job class.
+
 ## 1.21.4 - 2026-10-22
 
 ### Fixed

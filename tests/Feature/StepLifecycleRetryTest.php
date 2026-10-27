@@ -103,6 +103,18 @@ it('honours the millisecond backoff override instead of the seconds default', fu
         ->and($dispatchAfter->gt(now()->subSecond()))->toBeTrue();
 });
 
+it('persists the millisecond backoff fraction through the step model', function (): void {
+    $this->freezeTime();
+    $step = runningStep();
+    $job = jobFor($step);
+    $job->jobBackoffMs = 125;
+
+    $job->retryJob();
+
+    expect($step->fresh()->dispatch_after->format('Y-m-d H:i:s.v'))
+        ->toBe(now()->addMilliseconds(125)->format('Y-m-d H:i:s.v'));
+});
+
 it('retryForConfirmation flips the step into confirming-completion mode', function (): void {
     $step = runningStep();
 

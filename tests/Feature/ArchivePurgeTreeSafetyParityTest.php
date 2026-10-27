@@ -7,6 +7,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
+use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
 
@@ -57,6 +58,78 @@ it('purges a settled tree that contains a NotRunnable resolve-exception step', f
     Artisan::call('steps:purge', ['--days' => 30]);
 
     expect(DB::table(Step::tableName())->where('block_uuid', $blockUuid)->count())->toBe(0);
+});
+
+it('keeps an old failed block live while its same-group resolver is promotable', function (): void {
+    $blockUuid = (string) Str::uuid();
+
+    $failed = makeAgedStep([
+        'block_uuid' => $blockUuid,
+        'index' => 1,
+        'state' => Failed::class,
+        'group' => 'recovery-group',
+    ]);
+    $resolver = makeAgedStep([
+        'block_uuid' => $blockUuid,
+        'index' => null,
+        'type' => 'resolve-exception',
+        'state' => NotRunnable::class,
+        'group' => 'recovery-group',
+    ]);
+
+    Artisan::call('steps:archive', ['--duration' => 30]);
+
+    expect(DB::table(Step::tableName())->whereIn('id', [$failed->id, $resolver->id])->count())->toBe(2)
+        ->and(DB::table('steps_archive')->whereIn('id', [$failed->id, $resolver->id])->count())->toBe(0);
+
+    Artisan::call('steps:purge', ['--days' => 30]);
+
+    expect(DB::table(Step::tableName())->whereIn('id', [$failed->id, $resolver->id])->count())->toBe(2);
+});
+
+it('keeps an old global failed block live while its global resolver is promotable', function (): void {
+    $blockUuid = (string) Str::uuid();
+
+    $failed = makeAgedStep([
+        'block_uuid' => $blockUuid,
+        'index' => 1,
+        'state' => Failed::class,
+        'group' => 'temporary-global-group',
+    ]);
+    $resolver = makeAgedStep([
+        'block_uuid' => $blockUuid,
+        'index' => null,
+        'type' => 'resolve-exception',
+        'state' => NotRunnable::class,
+        'group' => 'temporary-global-group',
+    ]);
+    DB::table(Step::tableName())
+        ->whereIn('id', [$failed->id, $resolver->id])
+        ->update(['group' => null]);
+
+    Artisan::call('steps:archive', ['--duration' => 30]);
+
+    expect(DB::table(Step::tableName())->whereIn('id', [$failed->id, $resolver->id])->count())->toBe(2)
+        ->and(DB::table('steps_archive')->whereIn('id', [$failed->id, $resolver->id])->count())->toBe(0);
+});
+
+it('does not archive an old root while a descendant remains pending', function (): void {
+    $rootBlock = (string) Str::uuid();
+    $childBlock = (string) Str::uuid();
+
+    $root = makeAgedStep([
+        'block_uuid' => $rootBlock,
+        'child_block_uuid' => $childBlock,
+        'state' => Completed::class,
+    ]);
+    $child = makeAgedStep([
+        'block_uuid' => $childBlock,
+    ]);
+
+    Artisan::call('steps:archive', ['--duration' => 30]);
+
+    expect(DB::table(Step::tableName())->whereIn('id', [$root->id, $child->id])->count())->toBe(2)
+        ->and(DB::table('steps_archive')->whereIn('id', [$root->id, $child->id])->count())->toBe(0);
 });
 
 /**

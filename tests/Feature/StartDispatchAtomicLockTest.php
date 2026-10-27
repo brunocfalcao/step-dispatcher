@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Models\StepsDispatcher;
 
@@ -53,4 +54,39 @@ it('executes the stale-lock recovery as a single atomic UPDATE', function () {
         2,
         'startDispatch must merge the stale-lock failsafe reset and the CAS acquire into a single UPDATE statement'
     );
+});
+
+it('releases only dispatcher locks older than the configured threshold', function (): void {
+    $staleGroup = 'stale-release-'.bin2hex(random_bytes(6));
+    $freshGroup = 'fresh-release-'.bin2hex(random_bytes(6));
+
+    DB::table(StepsDispatcher::tableName())->insert([
+        [
+            'group' => $staleGroup,
+            'can_dispatch' => false,
+            'current_tick_id' => 101,
+            'updated_at' => now()->subSeconds(60),
+            'created_at' => now()->subSeconds(60),
+        ],
+        [
+            'group' => $freshGroup,
+            'can_dispatch' => false,
+            'current_tick_id' => 202,
+            'updated_at' => now()->subSeconds(5),
+            'created_at' => now()->subSeconds(5),
+        ],
+    ]);
+
+    expect(Artisan::call('steps:recover-stale', [
+        '--release-locks' => true,
+        '--lock-threshold' => 30,
+    ]))->toBe(0);
+
+    $stale = DB::table(StepsDispatcher::tableName())->where('group', $staleGroup)->first();
+    $fresh = DB::table(StepsDispatcher::tableName())->where('group', $freshGroup)->first();
+
+    expect((bool) $stale->can_dispatch)->toBeTrue()
+        ->and($stale->current_tick_id)->toBeNull()
+        ->and((bool) $fresh->can_dispatch)->toBeFalse()
+        ->and((int) $fresh->current_tick_id)->toBe(202);
 });

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Facades\Queue;
 use StepDispatcher\Exceptions\NoCleanWorkerException;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Failed;
@@ -221,6 +222,20 @@ describe('Retry re-fires the resolver', function (): void {
 });
 
 describe('Resolver physical queues survive queue validation', function (): void {
+    it('pushes the resolved physical queue instead of the logical queue', function (): void {
+        Queue::fake();
+        config()->set('step-dispatcher.queues.valid', ['default', 'positions']);
+        StepDispatcher::setQueueResolver(static fn (Step $step): string => 'eos-positions');
+
+        $step = makePendingStep('positions');
+        StepDispatcher::dispatch('test-group');
+
+        Queue::assertPushedOn('eos-positions', PrefixCarryingTestJob::class, function ($job) use ($step): bool {
+            return $job->step->id === $step->id;
+        });
+        expect($step->fresh()->queue)->toBe('eos-positions');
+    });
+
     it('keeps a resolver-set physical queue that is NOT in queues.valid', function (): void {
         // Production resolvers (Kraite StepRouter) compose physical queue
         // names like "{hostname}-{logical}" (eos-positions, tyche-priority).

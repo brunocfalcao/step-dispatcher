@@ -51,8 +51,18 @@ final class PendingToDispatched extends Transition
                 ->where('type', 'resolve-exception')
                 ->get();
 
-            // If the previous step exists and is completed, allow transition
-            if ($previousSteps->isNotEmpty() && in_array(get_class($previousSteps->first()->state), Step::concludedStepStates(), strict: true)) {
+            // Every parallel resolver at the previous stage must be
+            // concluded before this resolver can run. Checking only the
+            // first row lets a later sibling bypass a still-running
+            // resolver and breaks the same-stage barrier used by the batch
+            // dispatch path below.
+            if ($previousSteps->isNotEmpty() && $previousSteps->every(
+                static fn (Step $previous): bool => in_array(
+                    get_class($previous->state),
+                    Step::concludedStepStates(),
+                    strict: true,
+                )
+            )) {
                 return true;
             }
 

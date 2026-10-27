@@ -8,6 +8,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\NotRunnable;
 
 /**
  * Shared tree operations for steps:archive and steps:purge.
@@ -24,7 +25,9 @@ trait InteractsWithStepTrees
     /**
      * Root block candidates: no parent step points at the block via
      * child_block_uuid, every step in the block is settled, and the
-     * block's newest activity is older than the cutoff.
+     * block's newest activity is older than the cutoff. A NotRunnable
+     * resolver with a same-lane failed sibling is still owed promotion and
+     * therefore is not a settled-tree candidate.
      *
      * @return Collection<int, string>
      */
@@ -40,6 +43,13 @@ trait InteractsWithStepTrees
                 $q->select(DB::raw(1))
                     ->from($stepsTable.' as parent')
                     ->whereColumn('parent.child_block_uuid', 's.block_uuid');
+            })
+            ->whereNotExists(function ($q) use ($stepsTable): void {
+                $q->selectRaw('1')
+                    ->from($stepsTable.' as dormant')
+                    ->whereColumn('dormant.block_uuid', 's.block_uuid');
+
+                $this->wherePromotableDormantResolver($q, $stepsTable, 'dormant');
             })
             ->groupBy('s.block_uuid')
             ->havingRaw("SUM(CASE WHEN s.state NOT IN ({$placeholders}) THEN 1 ELSE 0 END) = 0", $settledStates)
@@ -89,9 +99,17 @@ trait InteractsWithStepTrees
      */
     private function treeIsFullySettled(array $treeUuids): bool
     {
-        return DB::table(Step::tableName())
-            ->whereIn('block_uuid', $treeUuids)
-            ->whereNotIn('state', Step::settledStepStates())
+        $stepsTable = Step::tableName();
+
+        return DB::table($stepsTable.' as current')
+            ->whereIn('current.block_uuid', $treeUuids)
+            ->where(function ($query) use ($stepsTable): void {
+                $query
+                    ->whereNotIn('current.state', Step::settledStepStates())
+                    ->orWhere(function ($promotable) use ($stepsTable): void {
+                        $this->wherePromotableDormantResolver($promotable, $stepsTable, 'current');
+                    });
+            })
             ->doesntExist();
     }
 
@@ -106,10 +124,48 @@ trait InteractsWithStepTrees
      */
     private function chunkWasRevived(array $uuidChunk): bool
     {
-        return DB::table(Step::tableName())
-            ->whereIn('block_uuid', $uuidChunk)
-            ->whereNotIn('state', Step::settledStepStates())
+        $stepsTable = Step::tableName();
+
+        return DB::table($stepsTable.' as current')
+            ->whereIn('current.block_uuid', $uuidChunk)
+            ->where(function ($query) use ($stepsTable): void {
+                $query
+                    ->whereNotIn('current.state', Step::settledStepStates())
+                    ->orWhere(function ($promotable) use ($stepsTable): void {
+                        $this->wherePromotableDormantResolver($promotable, $stepsTable, 'current');
+                    });
+            })
             ->lockForUpdate()
             ->exists();
+    }
+
+    /**
+     * Add the predicate shared by archive/purge checks for a resolver that
+     * can still be promoted by the dispatcher. A parked resolver with no
+     * matching failure remains settled and can retire normally; a failure in
+     * another group cannot promote this row and is deliberately ignored.
+     */
+    private function wherePromotableDormantResolver($query, string $stepsTable, string $resolverAlias): void
+    {
+        $query
+            ->where($resolverAlias.'.type', 'resolve-exception')
+            ->where($resolverAlias.'.state', NotRunnable::class)
+            ->whereExists(function ($failed) use ($stepsTable, $resolverAlias): void {
+                $failed
+                    ->selectRaw('1')
+                    ->from($stepsTable.' as failing')
+                    ->whereColumn('failing.block_uuid', $resolverAlias.'.block_uuid')
+                    ->where('failing.type', '<>', 'resolve-exception')
+                    ->whereIn('failing.state', Step::failedStepStates())
+                    ->where(function ($group) use ($resolverAlias): void {
+                        $group
+                            ->whereColumn('failing.group', $resolverAlias.'.group')
+                            ->orWhere(function ($global) use ($resolverAlias): void {
+                                $global
+                                    ->whereNull('failing.group')
+                                    ->whereNull($resolverAlias.'.group');
+                            });
+                    });
+            });
     }
 }

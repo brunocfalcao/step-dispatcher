@@ -56,6 +56,28 @@ abstract class BaseStepJob implements ShouldQueue
      */
     public string $stepPrefix = '';
 
+    /**
+     * Queue-payload attempt snapshot used by the last-resort failed() guard.
+     *
+     * The dispatcher stamps the current retry counter and dispatch tick onto
+     * the queued job. A later retry can have the same database state class
+     * (Running), so state alone cannot prove that a failure callback still
+     * owns the attempt it is reporting. Jobs created outside the dispatcher
+     * retain the legacy state-only behavior when no snapshot is available.
+     */
+    public bool $stepAttemptSnapshotAvailable = false;
+
+    public ?int $stepAttemptRetries = null;
+
+    public ?int $stepAttemptTickId = null;
+
+    /**
+     * Set when this instance claims a row directly. Queue-level failed()
+     * callbacks normally use the persisted dispatch tick instead because
+     * Laravel restores the original queue payload before invoking failed().
+     */
+    public ?string $stepAttemptStartedAt = null;
+
     public int $jobBackoffSeconds = 10;
 
     /**
@@ -171,6 +193,19 @@ abstract class BaseStepJob implements ShouldQueue
                 return;
             }
 
+            // A job built by the dispatcher already carries its queue
+            // snapshot. Directly-created jobs have no serialized snapshot,
+            // so capture the claimed row here for same-instance callbacks.
+            if (! $this->stepAttemptSnapshotAvailable) {
+                $this->stepAttemptSnapshotAvailable = true;
+                $this->stepAttemptRetries = (int) $this->step->retries;
+                $this->stepAttemptTickId = $this->step->tick_id === null
+                    ? null
+                    : (int) $this->step->tick_id;
+            }
+
+            $this->stepAttemptStartedAt = $this->step->started_at?->format('Y-m-d H:i:s.u');
+
             if ($this->isInConfirmationMode()) {
                 $this->handleConfirmationMode();
 
@@ -219,44 +254,101 @@ abstract class BaseStepJob implements ShouldQueue
         $context->push($this->stepPrefix);
 
         try {
-            $stepId = $this->step->id;
-
-            // Parse exception for friendly message and stack trace
             $parser = ExceptionParser::with($e);
 
-            // Update error_message, error_stack_trace, and response
-            $this->step->update([
-                'error_message' => $parser->friendlyMessage(),
-                'error_stack_trace' => $parser->stackTrace(),
-                'response' => ['exception' => $e->getMessage()],
-            ]);
+            // failed() may run after a worker timeout while recovery,
+            // cancellation, or completion has already changed the row. Lock
+            // and re-read the authoritative state before writing any failure
+            // payload, so an obsolete callback cannot overwrite the outcome
+            // that won the race.
+            $failureRecorded = $this->step->getConnection()->transaction(function () use ($parser, $e): bool {
+                $locked = Step::query()
+                    ->whereKey($this->step->getKey())
+                    ->lockForUpdate()
+                    ->first();
 
-            // Finalize duration
-            $this->finalizeDuration();
+                if ($locked === null) {
+                    return false;
+                }
 
-            // Only Running/Dispatched may fail here. Terminal states
-            // (Cancelled, Stopped, …) have no registered transition to
-            // Failed — attempting one throws out of failed(). And a step
-            // already back in Pending was recovered by someone else
-            // (recover-stale requeue); failing it would erase that
-            // recovery.
-            if ($this->step->state instanceof Running || $this->step->state instanceof Dispatched) {
+                $this->step = $locked;
+
+                // Only Running/Dispatched may fail here. Terminal states
+                // (Cancelled, Stopped, …) and a recovered Pending step have
+                // an authoritative outcome already; leave every field alone.
+                if (! ($this->step->state instanceof Running || $this->step->state instanceof Dispatched)) {
+                    return false;
+                }
+
+                if (! $this->failedAttemptIsCurrent($this->step)) {
+                    return false;
+                }
+
+                $this->step->update([
+                    'error_message' => $parser->friendlyMessage(),
+                    'error_stack_trace' => $parser->stackTrace(),
+                    'response' => ['exception' => $e->getMessage()],
+                ]);
+
+                $this->finalizeDuration();
                 $this->step->state->transitionTo(Failed::class);
 
+                return true;
+            });
+
+            if ($failureRecorded) {
                 // handle()'s catch block is the only other place that runs the
                 // job's resolveException() hook, and a queue-level kill
-                // (timeout, SIGKILL) never reaches it. Without this, a job that
-                // releases its own domain record on failure leaves that record
-                // pinned in its in-progress state forever — a timed-out
-                // architecture discovery stayed "researching" and every later
-                // discovery for that item was refused as already running.
-                // Runs only inside this guard: a step someone else cancelled or
-                // recovered was not failed here, so it has nothing to release.
+                // (timeout, SIGKILL) never reaches it. Run the hook only after
+                // the guarded failure transaction commits.
                 $this->resolveExceptionIfPossible($e);
             }
         } finally {
             $context->pop();
         }
+    }
+
+    /**
+     * Confirm that this failed callback still owns the current execution
+     * attempt. The row lock in failed() makes the comparison authoritative.
+     */
+    private function failedAttemptIsCurrent(Step $current): bool
+    {
+        if (! $this->queuedGenerationIsCurrent($current)) {
+            return false;
+        }
+
+        // A direct same-instance callback may have captured started_at. A
+        // normal queue-level callback is restored from the original payload,
+        // where started_at is still null; its tick/retry snapshot is the
+        // authoritative comparison above.
+        if ($this->stepAttemptStartedAt !== null) {
+            return $current->started_at?->format('Y-m-d H:i:s.u') === $this->stepAttemptStartedAt;
+        }
+
+        return true;
+    }
+
+    /**
+     * Compare the queued dispatch generation with the locked row. A dispatch
+     * tick is the durable generation marker; retries are retained as a
+     * fallback for direct/manual dispatch paths without a tick row. Jobs
+     * without a snapshot (queued by an older release, or created outside the
+     * dispatcher) keep the legacy state-only behavior.
+     */
+    private function queuedGenerationIsCurrent(Step $current): bool
+    {
+        if (! $this->stepAttemptSnapshotAvailable) {
+            return true;
+        }
+
+        if ($this->stepAttemptTickId !== null
+            && (int) $current->tick_id !== $this->stepAttemptTickId) {
+            return false;
+        }
+
+        return $this->stepAttemptRetries === null
+            || (int) $current->retries === $this->stepAttemptRetries;
     }
 
     final public function startDuration(): void
@@ -342,7 +434,22 @@ abstract class BaseStepJob implements ShouldQueue
             return false;
         }
 
+        // A job delivered after recovery re-queued its step belongs to an
+        // older dispatch generation. The newer dispatch owns the run; letting
+        // the old job start would also leave its later failed() callback
+        // rejected by the generation guard there.
+        if (! $this->queuedGenerationIsCurrent($this->step)) {
+            return false;
+        }
+
         $this->step->state->transitionTo(Running::class);
+
+        // The transition persists started_at through the model's date
+        // formatter and the database column may retain less precision than
+        // Carbon::now(). Canonicalize the claimed attempt from the row that
+        // failed() will later lock and reload, so same-instance callbacks do
+        // not compare an unsaved fractional timestamp to persisted data.
+        $this->step->refresh();
 
         return true;
     }

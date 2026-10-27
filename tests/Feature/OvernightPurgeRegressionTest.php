@@ -46,3 +46,16 @@ it('evaluates all callable tick pages while deleting earlier pages', function ()
         (new ReflectionProperty(StepsDispatcher::class, 'recordTickWhenCallable'))->setValue(null, $oldCallable);
     }
 });
+
+it('fails tick purge and preserves ticks when no recording callable is registered', function (): void {
+    $tickId = overnightTick('missing-callback-'.bin2hex(random_bytes(6)), now()->subDay());
+    $oldCallable = StepsDispatcher::getRecordTickWhenCallable();
+    (new ReflectionProperty(StepsDispatcher::class, 'recordTickWhenCallable'))->setValue(null);
+
+    try {
+        expect(Artisan::call('steps:purge', ['--ticks' => true]))->toBe(1)
+            ->and(DB::table('steps_dispatcher_ticks')->where('id', $tickId)->exists())->toBeTrue();
+    } finally {
+        (new ReflectionProperty(StepsDispatcher::class, 'recordTickWhenCallable'))->setValue($oldCallable);
+    }
+});

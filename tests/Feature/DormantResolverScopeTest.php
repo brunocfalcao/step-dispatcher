@@ -9,9 +9,11 @@ use StepDispatcher\Models\Step;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
+use StepDispatcher\States\Running;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Support\Steps;
+use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
 
 beforeEach(function (): void {
     $this->scopeFlagRoot = sys_get_temp_dir().'/dispatcher-resolver-scope-'.bin2hex(random_bytes(8));
@@ -64,4 +66,41 @@ it('recovers a prefixed dormant resolver without waking the default prefix', fun
         ->and(StepDispatcher::hasActiveSteps())->toBeFalse()
         ->and(Steps::usingPrefix('recovery', fn (): bool => StepDispatcher::isActive()))->toBeTrue()
         ->and(Steps::usingPrefix('recovery', fn (): Step => Step::findOrFail($resolverId))->state)->toBeInstanceOf(NotRunnable::class);
+});
+
+it('recovers a stale running row only in the selected prefix', function (): void {
+    $default = Step::create([
+        'class' => PrefixCarryingTestJob::class,
+        'block_uuid' => (string) Str::uuid(),
+        'index' => 1,
+        'group' => 'default-stale',
+    ]);
+    DB::table(Step::tableName())->where('id', $default->id)->update([
+        'state' => Running::class,
+        'started_at' => now()->subMinutes(10),
+    ]);
+
+    $this->artisan('steps:install', ['--prefix' => 'recovery'])->assertSuccessful();
+    $recoveryId = Steps::usingPrefix('recovery', function (): int {
+        $step = Step::create([
+            'class' => PrefixCarryingTestJob::class,
+            'block_uuid' => (string) Str::uuid(),
+            'index' => 1,
+            'group' => 'recovery-stale',
+        ]);
+        DB::table(Step::tableName())->where('id', $step->id)->update([
+            'state' => Running::class,
+            'started_at' => now()->subMinutes(10),
+        ]);
+
+        return $step->id;
+    });
+
+    $this->artisan('steps:recover-stale', ['--prefix' => 'recovery'])->assertSuccessful();
+
+    $recovered = Steps::usingPrefix('recovery', fn (): Step => Step::findOrFail($recoveryId));
+    expect($recovered->state)->toBeInstanceOf(Pending::class)
+        ->and((int) $recovered->retries)->toBe(1)
+        ->and($default->fresh()->state)->toBeInstanceOf(Running::class)
+        ->and((int) $default->fresh()->retries)->toBe(0);
 });

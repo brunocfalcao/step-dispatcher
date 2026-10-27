@@ -24,8 +24,12 @@ final class StepFactory extends Factory
     {
         return [
             'state' => Pending::class,
-            'class' => 'App\Support\Tests\EchoJob',
-            'queue' => 'sync',
+            // A consuming application owns the executable job class. Leaving
+            // this null makes the factory contract explicit instead of
+            // pointing at a class that does not exist in the package or every
+            // host application. Tests that dispatch the row must override it.
+            'class' => null,
+            'queue' => 'default',
             'block_uuid' => null,
             'child_block_uuid' => null,
             'index' => null,

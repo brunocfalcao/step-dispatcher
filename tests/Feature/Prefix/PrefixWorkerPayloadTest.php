@@ -30,7 +30,7 @@ beforeEach(function (): void {
     $this->artisan('steps:install', ['--prefix' => 'trading'])->assertSuccessful();
 });
 
-it('dispatched job carries the ambient prefix on its stepPrefix property', function () {
+it('dispatched job carries its prefix and attempt generation', function () {
     Steps::usingPrefix('trading', function (): void {
         $step = Step::create([
             'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
@@ -48,10 +48,44 @@ it('dispatched job carries the ambient prefix on its stepPrefix property', funct
             \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
             function ($job) use ($step): bool {
                 return $job->step->id === $step->id
-                    && $job->stepPrefix === 'trading_';
+                    && $job->stepPrefix === 'trading_'
+                    && $job->stepAttemptSnapshotAvailable === true
+                    && $job->stepAttemptRetries === 0
+                    && $job->stepAttemptTickId === $job->step->tick_id;
             }
         );
     });
+});
+
+it('successful worker execution reads and writes only the prefixed step', function (): void {
+    $stepId = Steps::usingPrefix('trading', function (): int {
+        $step = Step::create([
+            'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+            'type' => 'default',
+            'queue' => 'default',
+            'group' => 'successful-prefix',
+            'index' => null,
+            'block_uuid' => (string) Str::uuid(),
+            'state' => Pending::class,
+        ]);
+
+        DB::table('trading_steps')->where('id', $step->id)->update([
+            'state' => \StepDispatcher\States\Dispatched::class,
+        ]);
+
+        return $step->id;
+    });
+
+    app(RuntimeContext::class)->reset();
+    $job = new \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+    $job->step = Steps::usingPrefix('trading', fn (): Step => Step::findOrFail($stepId));
+    $job->stepPrefix = 'trading_';
+    $job->handle();
+
+    $prefixed = Steps::usingPrefix('trading', fn (): Step => Step::findOrFail($stepId));
+    expect($prefixed->state)->toBeInstanceOf(\StepDispatcher\States\Completed::class)
+        ->and($prefixed->response)->toBe(['observed_prefix' => 'trading_'])
+        ->and(DB::table('steps')->where('id', $stepId)->exists())->toBeFalse();
 });
 
 it('handle() pushes stepPrefix and the finally pop balances the stack', function () {

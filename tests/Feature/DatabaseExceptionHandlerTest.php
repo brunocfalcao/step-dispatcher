@@ -39,6 +39,18 @@ function makeQueryException(string $message, ?int $errno = null, string $sqlStat
     return new QueryException('testing', 'select 1', [], $previous);
 }
 
+function makeQueryExceptionWithCode(string $code): QueryException
+{
+    $exception = makeQueryException('opaque driver error');
+
+    // Exception::code is normally populated from the PDO driver. This
+    // package test uses a synthetic QueryException, so set the SQLSTATE
+    // directly to exercise code matching without a matching message.
+    (new ReflectionProperty(Exception::class, 'code'))->setValue($exception, $code);
+
+    return $exception;
+}
+
 it('routes the make() factory to the correct handler per engine', function (): void {
     expect(BaseDatabaseExceptionHandler::make('mysql'))->toBeInstanceOf(MySqlDatabaseExceptionHandler::class)
         ->and(BaseDatabaseExceptionHandler::make('mariadb'))->toBeInstanceOf(MySqlDatabaseExceptionHandler::class)
@@ -88,6 +100,15 @@ it('classifies a pgsql serialization failure as retryable by sqlstate', function
 
     expect($handler->shouldRetry(makeQueryException('deadlock detected')))->toBeTrue()
         ->and($handler->isPermanentError(makeQueryException('duplicate key value violates unique constraint')))->toBeTrue();
+});
+
+it('classifies neutral PostgreSQL SQLSTATE codes without message hints', function (): void {
+    $handler = new PgsqlDatabaseExceptionHandler;
+
+    expect($handler->shouldRetry(makeQueryExceptionWithCode('40001')))->toBeTrue()
+        ->and($handler->shouldRetry(makeQueryExceptionWithCode('40P01')))->toBeTrue()
+        ->and($handler->isPermanentError(makeQueryExceptionWithCode('23505')))->toBeTrue()
+        ->and($handler->shouldRetry(makeQueryExceptionWithCode('23505')))->toBeFalse();
 });
 
 it('retries our advisory-lock RuntimeException even though it is not a QueryException', function (): void {

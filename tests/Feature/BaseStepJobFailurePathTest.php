@@ -2,10 +2,12 @@
 
 declare(strict_types=1);
 
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Cancelled;
+use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
@@ -91,6 +93,27 @@ it('does not clobber a recovered Pending step when failed() fires late', functio
     expect($step->fresh()->state)->toBeInstanceOf(Pending::class);
 });
 
+it('preserves terminal and recovered payloads when failed() fires late', function (string $state): void {
+    $step = makeFailureStep($state);
+    DB::table(Step::tableName())->where('id', $step->id)->update([
+        'response' => json_encode(['winner' => 'completed']),
+        'error_message' => 'winner payload',
+        'error_stack_trace' => 'winner trace',
+        'duration' => 42,
+    ]);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+    $job->failed(new RuntimeException('obsolete queue callback'));
+
+    $fresh = $step->fresh();
+    expect($fresh->state)->toBeInstanceOf($state)
+        ->and($fresh->response)->toBe(['winner' => 'completed'])
+        ->and($fresh->error_message)->toBe('winner payload')
+        ->and($fresh->error_stack_trace)->toBe('winner trace')
+        ->and((int) $fresh->duration)->toBe(42);
+})->with([Cancelled::class, Pending::class, Completed::class]);
+
 it('runs the job resolveException hook when failed() fires on a killed step', function (): void {
     ResolvingOnFailureTestJob::reset();
     $step = makeFailureStep(Running::class, ResolvingOnFailureTestJob::class);
@@ -118,6 +141,72 @@ it('does not run the resolveException hook when failed() leaves the step alone',
 
     expect($step->fresh()->state)->toBeInstanceOf(Cancelled::class)
         ->and(ResolvingOnFailureTestJob::$resolved)->toBeFalse();
+});
+
+it('does not let an older running callback fail a newer retry attempt', function (): void {
+    $step = makeFailureStep(Running::class);
+    DB::table(Step::tableName())->where('id', $step->id)->update([
+        'retries' => 1,
+        'started_at' => now(),
+        'response' => json_encode(['winner' => 'new-attempt']),
+        'error_message' => 'new attempt owns the row',
+        'error_stack_trace' => 'new attempt trace',
+        'duration' => 37,
+    ]);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+    $job->stepAttemptSnapshotAvailable = true;
+    $job->stepAttemptRetries = 0;
+    $job->stepAttemptTickId = null;
+    $job->stepAttemptStartedAt = null;
+
+    $job->failed(new RuntimeException('obsolete first-attempt callback'));
+
+    $fresh = $step->fresh();
+    expect($fresh->state)->toBeInstanceOf(Running::class)
+        ->and((int) $fresh->retries)->toBe(1)
+        ->and($fresh->response)->toBe(['winner' => 'new-attempt'])
+        ->and($fresh->error_message)->toBe('new attempt owns the row')
+        ->and($fresh->error_stack_trace)->toBe('new attempt trace')
+        ->and((int) $fresh->duration)->toBe(37);
+});
+
+it('runs the failure hook for a current same-generation callback after claim', function (): void {
+    $frozen = Carbon::create(2030, 1, 2, 3, 4, 5, 'UTC')->setMicrosecond(123456);
+    Carbon::setTestNow($frozen);
+
+    try {
+        ResolvingOnFailureTestJob::reset();
+        $step = makeFailureStep(Dispatched::class, ResolvingOnFailureTestJob::class);
+
+        $job = new ResolvingOnFailureTestJob;
+        $job->step = $step;
+
+        // This is the real worker claim path. handle() records the same
+        // snapshot immediately after prepareJobExecution() returns.
+        $prepare = new ReflectionMethod($job, 'prepareJobExecution');
+        expect($prepare->invoke($job))->toBeTrue();
+        $persisted = $step->fresh();
+
+        expect($frozen->microsecond)->toBe(123456)
+            ->and($job->step->state)->toBeInstanceOf(Running::class)
+            ->and($job->step->started_at?->format('Y-m-d H:i:s.u'))
+            ->toBe($persisted->started_at?->format('Y-m-d H:i:s.u'));
+
+        $job->stepAttemptSnapshotAvailable = true;
+        $job->stepAttemptRetries = (int) $job->step->retries;
+        $job->stepAttemptTickId = $job->step->tick_id === null ? null : (int) $job->step->tick_id;
+        $job->stepAttemptStartedAt = $job->step->started_at?->format('Y-m-d H:i:s.u');
+
+        $job->failed(new RuntimeException('current attempt failed'));
+
+        expect($step->fresh()->state)->toBeInstanceOf(Failed::class)
+            ->and(ResolvingOnFailureTestJob::$resolved)->toBeTrue()
+            ->and(ResolvingOnFailureTestJob::$resolvedErrorMessage)->toContain('current attempt failed');
+    } finally {
+        Carbon::setTestNow();
+    }
 });
 
 it('does not escalate a zero-retry job to high priority before any retry', function (): void {
@@ -158,4 +247,43 @@ it('keeps a message the job wrote itself before failing', function (): void {
     $job->reportAndFail(new RuntimeException('generic wrapper'));
 
     expect($step->fresh()->error_message)->toBe('Order 42 was rejected by the exchange');
+});
+
+it('does not let a job from an older dispatch generation claim a re-queued step', function (string $state): void {
+    $step = makeFailureStep($state);
+    // Recovery re-queued the step after the first job waited too long: the
+    // row now carries the next retry and a newer dispatch tick.
+    DB::table(Step::tableName())->where('id', $step->id)->update(['retries' => 1, 'tick_id' => 8]);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+    $job->stepAttemptSnapshotAvailable = true;
+    $job->stepAttemptRetries = 0;
+    $job->stepAttemptTickId = 7;
+
+    $prepare = new ReflectionMethod($job, 'prepareJobExecution');
+
+    expect($prepare->invoke($job))->toBeFalse();
+
+    $fresh = $step->fresh();
+    expect($fresh->state)->toBeInstanceOf($state)
+        ->and($fresh->started_at)->toBeNull()
+        ->and((int) $fresh->retries)->toBe(1)
+        ->and((int) $fresh->tick_id)->toBe(8);
+})->with([Dispatched::class, Pending::class]);
+
+it('lets a job from the current dispatch generation claim its step', function (): void {
+    $step = makeFailureStep(Dispatched::class);
+    DB::table(Step::tableName())->where('id', $step->id)->update(['retries' => 1, 'tick_id' => 8]);
+
+    $job = new PrefixCarryingTestJob;
+    $job->step = $step->fresh();
+    $job->stepAttemptSnapshotAvailable = true;
+    $job->stepAttemptRetries = 1;
+    $job->stepAttemptTickId = 8;
+
+    $prepare = new ReflectionMethod($job, 'prepareJobExecution');
+
+    expect($prepare->invoke($job))->toBeTrue()
+        ->and($step->fresh()->state)->toBeInstanceOf(Running::class);
 });

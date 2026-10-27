@@ -1,5 +1,20 @@
 # step-dispatcher
 
+## Changes in v1.21.5
+
+A queue-level failure callback (timeout or killed worker) now fails a Step
+only while the row, re-read under a row lock, is still Running or Dispatched
+for the same dispatch tick and retry count that queued the job. A late
+callback from an earlier attempt no longer overwrites a newer retry, a
+recovery or a terminal outcome, and `resolveException()` runs only after the
+failure commits. A job delivered after recovery re-queued its Step no longer
+starts it. Jobs queued before this version keep the state-only checks.
+A resolver waits for every parallel resolver of the previous stage.
+`activeGroups()`, `steps:archive` and `steps:purge` treat a dormant resolver
+that a failed sibling can still promote as active work. Millisecond backoff
+is persisted with millisecond precision, and the package `StepFactory` no
+longer names a job class.
+
 ## Changes in v1.21.4
 
 A Step job now claims its start under a row lock: the terminal and Running
@@ -220,7 +235,8 @@ The dispatcher reflects the job constructor and matches `arguments` by
 **parameter name**. Optional defaults are honored; missing required arguments
 fail dispatch. This is not container dependency injection. Use JSON-compatible
 inputs and resolve services inside the job when needed. The dispatcher attaches
-`$this->step` and the runtime prefix before queuing the job.
+`$this->step`, runtime prefix, and retry/dispatch-generation snapshot before
+queuing the job.
 
 `handle()` and `failed()` are final; implement `compute()` and optional hooks.
 A positive public `$retries` property must be supplied by your job: the base
@@ -254,8 +270,10 @@ protected function formatResultForStorage(mixed $result): mixed
 `started_at`, `completed_at`, `duration` in milliseconds, and `hostname` describe
 the current/latest run, not every attempt. Retrying resets run timing; entering
 Pending clears the hostname. `failed(Throwable $e)` records queue-level failures
-and only fails a row still Running or Dispatched; it preserves recovered or
-terminal states and calls exception resolution for the row it fails.
+and only fails a row still Running or Dispatched whose queued retry/dispatch
+generation still matches. It preserves recovered or terminal states, protects
+newer Running retries from stale callbacks, and calls exception resolution for
+the row it fails.
 
 ## Step data and ownership
 
@@ -278,6 +296,10 @@ A partial child owner is replaced by a complete inherited owner when available.
 Children inherit a parent's high priority when their own priority is unset.
 Explicit child priority wins. New independent work receives a workflow UUID and
 round-robin group assignment when those are absent.
+
+The package `StepFactory` leaves `class` unset because the executable queue job
+belongs to the consuming application. Tests that dispatch a factory row must
+provide the application job class explicitly; its queue defaults to `default`.
 
 An optional job `relatable()` hook may return an Eloquent model to associate
 when the run begins. This differs from creation-time inheritance.
@@ -406,11 +428,13 @@ if it may never succeed. Successful confirmation uses the parent completion gate
 Optional due times accept `Carbon`, `CarbonImmutable`, or null. Without an
 explicit time, `retryJob()` and `rescheduleWithoutRetry()` use
 `$jobBackoffSeconds = 10`, or positive `$jobBackoffMs` instead. Millisecond
-computation is **best effort**: persisted precision depends on schema and ORM
-date formatting, and execution depends on scheduler/worker cadence. The default
-precision migration and prefixed installer differ; the model does not override
-Eloquent's default second-format date serialization. No exact sub-second
-execution guarantee is made.
+backoff is persisted with millisecond schema/model precision only after the
+default precision migration has run on unprefixed tables or the current
+`steps:install --prefix=...` command has created the prefixed tables. Older
+second-precision prefixed `<prefix>steps` and `<prefix>steps_archive` schemas
+may truncate the fraction until the host upgrades both `dispatch_after`
+columns compatibly, and actual execution still depends on scheduler/worker
+cadence; no exact sub-second execution guarantee is made.
 
 Ordinary retry can set high priority once the current retry counter is at least
 half a positive job budget. Override `shouldChangeToHighPriority(): bool` to
@@ -654,8 +678,10 @@ lane. Lists accept comma, colon, semicolon, pipe, or whitespace separators;
 literal `null` selects SQL NULL. Unhandled command errors produce a nonzero exit.
 
 Direct `StepDispatcher::dispatch(null)` targets **only the null group**, not all
-groups. `hasActiveSteps()` checks Pending/Dispatched/Running;
-`activeGroups()` returns named active groups. `activate()`, `deactivate()`, and
+groups. `hasActiveSteps()` checks Pending/Dispatched/Running plus a dormant
+resolver that can be promoted after a failed block; `activeGroups()` returns
+named active groups, including those promotable dormant resolver lanes.
+`activate()`, `deactivate()`, and
 `isActive()` manage the current prefix's flag. Eloquent creation activates it;
 raw database creation requires you to supply metadata and coordinate activation.
 
@@ -694,10 +720,12 @@ Your host listener owns notification delivery and response.
 
 `steps:archive` selects old root blocks using their newest
 `COALESCE(completed_at, updated_at)` timestamp, then checks the complete tree is
-settled (terminal or NotRunnable). It copies rows with IDs/metadata to the archive
-and deletes live rows in batches, rechecking revival before mutation. A newer
-settled descendant may move with an old root. The whole tree is not moved in one
-single transaction; do not interpret archival as an immutable workflow snapshot.
+settled (terminal or an unused NotRunnable resolver). A NotRunnable resolver
+with a same-group failed sibling remains live until the dispatcher can promote
+it. It copies rows with IDs/metadata to the archive and deletes live rows in
+batches, rechecking revival before mutation. A newer settled descendant may move
+with an old root. The whole tree is not moved in one single transaction; do not
+interpret archival as an immutable workflow snapshot.
 
 Default `steps:purge` removes old ticks by `created_at` and old fully settled live
 trees; it does not purge archive rows. `--only-archive` deletes archive rows by
