@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.6 - 2026-10-29
+
+### Fixed
+- A failed dispatch push records its failure only when the Step, re-read under
+  a row lock, is still Dispatched for the same dispatch tick and retry count
+  that made the attempt. A recovery or a newer dispatch that claimed the Step
+  while the push was in flight is no longer marked Failed by the older attempt.
+
 ## 1.21.5 - 2026-10-27
 
 ### Fixed

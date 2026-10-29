@@ -26,6 +26,13 @@ trait DispatchesJobs
             return;
         }
 
+        // Keep the generation that this dispatch attempt claimed. A fresh
+        // state read alone cannot prove that a later failure still owns the
+        // row: recovery can requeue it, or another tick can claim it again,
+        // while this push is in flight.
+        $attemptRetries = (int) $step->retries;
+        $attemptTickId = $step->tick_id === null ? null : (int) $step->tick_id;
+
         try {
             // Consumer-app queue routing override. When the host
             // application has registered a queue resolver via
@@ -89,16 +96,38 @@ trait DispatchesJobs
             // → Failed is a registered transition, so it would succeed).
             $step->refresh();
 
-            if ($step->state instanceof Dispatched) {
+            // Lock the authoritative row and compare the dispatch generation
+            // before recording a failure. The lock serializes this transition
+            // with recovery/re-dispatch writers; the strict null-aware tick
+            // comparison also rejects a null-tick attempt against a newer
+            // non-null generation.
+            $step->getConnection()->transaction(function () use (&$step, $e, $attemptRetries, $attemptTickId): bool {
+                $current = $step->newQuery()
+                    ->whereKey($step->getKey())
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($current === null || ! ($current->state instanceof Dispatched)) {
+                    return false;
+                }
+
+                $currentTickId = $current->tick_id === null ? null : (int) $current->tick_id;
+                if ($currentTickId !== $attemptTickId || (int) $current->retries !== $attemptRetries) {
+                    return false;
+                }
+
                 $parser = ExceptionParser::with($e);
 
-                $step->update([
+                $current->update([
                     'error_message' => $parser->friendlyMessage(),
                     'error_stack_trace' => $parser->stackTrace(),
                 ]);
 
-                $step->state->transitionTo(Failed::class);
-            }
+                $current->state->transitionTo(Failed::class);
+                $step = $current;
+
+                return true;
+            });
 
             Log::error('[DispatchSingleStep] EXCEPTION: '.$e->getMessage(), [
                 'step_id' => $step->id,

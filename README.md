@@ -1,5 +1,13 @@
 # step-dispatcher
 
+## Changes in v1.21.6
+
+When a dispatch push fails, the dispatcher now records the failure only if
+the row, re-read under a row lock, is still Dispatched for the same dispatch
+tick and retry count that made the attempt. A later recovery, re-dispatch or
+retry is no longer overwritten by an earlier attempt's exception. A missing
+row is treated as not owned.
+
 ## Changes in v1.21.5
 
 A queue-level failure callback (timeout or killed worker) now fails a Step
