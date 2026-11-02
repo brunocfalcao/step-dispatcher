@@ -1,5 +1,14 @@
 # step-dispatcher
 
+## Changes in v1.21.7
+
+`steps:recover-stale --release-locks` now releases each stale dispatcher lock
+by its primary key, re-checking that the lock is still stale. Previously one
+bulk update locked the `can_dispatch` index before the primary key, which
+could deadlock against a tick ending at the same moment on MySQL and abort
+the whole recovery run. A lock conflict on one lane is logged and the sweep
+continues with the others; other database errors still fail the run.
+
 ## Changes in v1.21.6
 
 When a dispatch push fails, the dispatcher now records the failure only if

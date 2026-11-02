@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.7 - 2026-11-02
+
+### Fixed
+- `steps:recover-stale --release-locks` releases each stale dispatcher lock by
+  its primary key and re-checks that the lock is still stale before releasing
+  it. The previous single bulk release locked the `can_dispatch` index before
+  the primary key, which deadlocked against a tick ending at the same moment on
+  MySQL and aborted the whole recovery run. A lane whose tick restarted after
+  the candidate read is left alone. A lock conflict on one lane is logged and
+  the sweep continues; other database errors are still raised.
+
 ## 1.21.6 - 2026-10-29
 
 ### Fixed

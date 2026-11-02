@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace StepDispatcher\Commands;
 
 use Illuminate\Contracts\Database\ModelIdentifier;
+use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\QueryException;
 use Illuminate\Queue\RedisQueue;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
@@ -49,6 +51,8 @@ use Throwable;
  */
 final class RecoverStaleStepsCommand extends BaseCommand
 {
+    use DetectsConcurrencyErrors;
+
     /**
      * Buffer added to the job timeout before considering a Running step stale.
      */
@@ -565,14 +569,45 @@ final class RecoverStaleStepsCommand extends BaseCommand
     {
         $staleThreshold = now()->subSeconds($thresholdSeconds);
 
-        $released = DB::table(StepsDispatcher::tableName())
+        // Read the candidates without locking, then release each row by its
+        // primary key. endDispatch() locks its row through the primary key
+        // before it updates the can_dispatch index; a bulk UPDATE filtered on
+        // can_dispatch locks that index first and deadlocks against it on
+        // MySQL. The per-row WHERE re-checks the stale condition, so a lane
+        // whose tick ended or restarted after the read is left alone.
+        $staleIds = DB::table(StepsDispatcher::tableName())
             ->where('can_dispatch', false)
             ->where('updated_at', '<', $staleThreshold)
-            ->update([
-                'can_dispatch' => true,
-                'current_tick_id' => null,
-                'updated_at' => now(),
-            ]);
+            ->orderBy('id')
+            ->pluck('id');
+
+        $released = 0;
+
+        foreach ($staleIds as $dispatcherId) {
+            try {
+                $released += DB::table(StepsDispatcher::tableName())
+                    ->where('id', $dispatcherId)
+                    ->where('can_dispatch', false)
+                    ->where('updated_at', '<', $staleThreshold)
+                    ->update([
+                        'can_dispatch' => true,
+                        'current_tick_id' => null,
+                        'updated_at' => now(),
+                    ]);
+            } catch (QueryException $e) {
+                if (! $this->causedByConcurrencyError($e)) {
+                    throw $e;
+                }
+
+                // A lock conflict means another writer holds this row, most
+                // likely its own tick releasing it. The next sweep re-checks
+                // the row; the rest of this sweep must still run.
+                Log::warning('Stale dispatcher lock release skipped after a lock conflict', [
+                    'dispatcher_id' => $dispatcherId,
+                    'exception' => $e->getMessage(),
+                ]);
+            }
+        }
 
         if ($released === 0) {
             return;
