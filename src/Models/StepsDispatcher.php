@@ -47,7 +47,8 @@ final class StepsDispatcher extends BaseModel
      * Cache key prefix scoped to the active runtime prefix so two
      * dispatchers with different prefixes but the same group name
      * don't collide on the same cache entries (current_tick_id,
-     * steps_dispatcher_tick_start, etc.).
+     * steps_dispatcher_tick_start, etc.). The separator keeps prefix "trading"
+     * with group "alpha" apart from an unprefixed group "trading_alpha".
      */
     public static function cacheKeyPrefix(): string
     {
@@ -55,7 +56,7 @@ final class StepsDispatcher extends BaseModel
 
         // Empty prefix renders as bare keys for backwards compatibility
         // with hosts that have always run a single (default) dispatcher.
-        return $prefix === '' ? '' : $prefix;
+        return $prefix === '' ? '' : $prefix.'|';
     }
 
     /**

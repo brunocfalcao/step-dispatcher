@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Abstracts;
 
+use Closure;
 use Illuminate\Bus\Batchable;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -17,11 +18,14 @@ use StepDispatcher\Concerns\BaseStepJob\FormatsStepResult;
 use StepDispatcher\Concerns\BaseStepJob\HandlesStepExceptions;
 use StepDispatcher\Concerns\BaseStepJob\HandlesStepLifecycle;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\Running;
+use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\ExceptionParser;
 use StepDispatcher\Support\RuntimeContext;
+use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Support\Timing;
 use Throwable;
 
@@ -77,6 +81,24 @@ abstract class BaseStepJob implements ShouldQueue
      * Laravel restores the original queue payload before invoking failed().
      */
     public ?string $stepAttemptStartedAt = null;
+
+    /**
+     * Set once this instance has learned that its attempt no longer owns the
+     * row. Every later write and consumer hook of the instance is then skipped.
+     */
+    private bool $stepAttemptSuperseded = false;
+
+    /**
+     * Set when one of this attempt's own guarded writes moved the row out of
+     * Running, for example a retryJob() called from compute().
+     */
+    private bool $stepAttemptMovedStep = false;
+
+    /**
+     * Set when this attempt's outcome reached the row and a project's reaction
+     * to it then failed. The outcome stands: there is nothing left to retry.
+     */
+    private bool $stepOutcomeSavedBeforeFailure = false;
 
     public int $jobBackoffSeconds = 10;
 
@@ -216,6 +238,15 @@ abstract class BaseStepJob implements ShouldQueue
                 return;
             }
 
+            // A step lost during a start check must not begin its work, and
+            // that includes what a consumer's executeJobLogic() does before
+            // compute(). There is no check like this after executeJobLogic():
+            // consumers release locks in finalizeJobExecution(), so that path
+            // still runs and its own steps are guarded one by one.
+            if ($this->attemptIsSuperseded()) {
+                return;
+            }
+
             $this->executeJobLogic();
 
             if ($this->needsVerification()) {
@@ -297,6 +328,10 @@ abstract class BaseStepJob implements ShouldQueue
             });
 
             if ($failureRecorded) {
+                // This attempt moved the row itself, so its own failure must
+                // not read as having lost the step.
+                $this->stepAttemptMovedStep = true;
+
                 // handle()'s catch block is the only other place that runs the
                 // job's resolveException() hook, and a queue-level kill
                 // (timeout, SIGKILL) never reaches it. Run the hook only after
@@ -330,11 +365,285 @@ abstract class BaseStepJob implements ShouldQueue
     }
 
     /**
+     * Run a post-run write only while this attempt still owns the row.
+     *
+     * A worker can outlive its claim: recovery may re-queue the step while the
+     * old worker is still alive, and another process may stop or cancel it.
+     * The model transitions validate only this instance's copy of the state,
+     * so the row is locked and compared first, as failed() does. A refused
+     * attempt changes nothing and stays refused for the rest of the run.
+     *
+     * A parent the dispatcher completed under this attempt keeps that result.
+     * A write that would decide the outcome is left out, and the attempt carries
+     * on. Only a write that cannot change the outcome passes
+     * runsOnCompletedParent. The write receives the locked row, or this
+     * attempt's own copy when ownership does not apply.
+     *
+     * Consumer transactions may wrap this call. The lock is taken where the
+     * write would have locked the row anyway, so the lock order is unchanged.
+     */
+    private function whileAttemptOwnsStep(Closure $write, bool $runsOnCompletedParent = false): void
+    {
+        if ($this->stepAttemptSuperseded) {
+            return;
+        }
+
+        if (! $this->attemptOwnershipApplies()) {
+            $write($this->step);
+
+            return;
+        }
+
+        $completedUnderAttempt = false;
+        $stateBeforeWrite = get_class($this->step->state);
+
+        try {
+            $owned = Step::whileRowLocked($this->step->getKey(), function (?Step $locked) use ($write, $runsOnCompletedParent, &$completedUnderAttempt): bool {
+                if (! $this->attemptOwnsRow($locked)) {
+                    return false;
+                }
+
+                $completedUnderAttempt = $this->rowCompletedUnderAttempt($locked);
+
+                if ($completedUnderAttempt && ! $runsOnCompletedParent) {
+                    return true;
+                }
+
+                $write($locked);
+
+                return true;
+            });
+        } catch (Throwable $e) {
+            $this->settleCopyAfterFailedWrite($stateBeforeWrite);
+
+            throw $e;
+        }
+
+        if (! $owned) {
+            $this->markAttemptSuperseded();
+
+            return;
+        }
+
+        if ($completedUnderAttempt) {
+            if (! $runsOnCompletedParent) {
+                $this->logKeptCompletedResult();
+            }
+
+            return;
+        }
+
+        if (! ($this->step->state instanceof Running)) {
+            $this->stepAttemptMovedStep = true;
+        }
+    }
+
+    /**
+     * A failed write can leave this copy holding a state the row never got, or a
+     * saved state still marked as unsaved. Its next save would then write the
+     * refused state or fire a project's reaction a second time, so the copy goes
+     * back to the row.
+     *
+     * A write that moved the state and reached the row was saved, and only a
+     * project's reaction to it failed: the attempt must not read that move as
+     * having lost the step. Anything else saved no outcome, whatever this copy
+     * says. A failed read proves nothing either way, and must not replace the
+     * failure being reported: a statement in a transaction Postgres aborted always
+     * fails. The copy then goes back to what it last read from the row.
+     */
+    private function settleCopyAfterFailedWrite(string $stateBeforeWrite): void
+    {
+        $attemptedState = get_class($this->step->state);
+
+        try {
+            $row = Step::query()->whereKey($this->step->getKey())->first();
+        } catch (Throwable) {
+            $row = null;
+        }
+
+        if ($row !== null
+            && $attemptedState !== $stateBeforeWrite
+            && get_class($row->state) === $attemptedState) {
+            $this->stepAttemptMovedStep = true;
+            $this->stepOutcomeSavedBeforeFailure = true;
+        }
+
+        $this->returnCopyToRow($row);
+    }
+
+    /**
+     * A project's own transaction can undo a state this attempt saved, as the
+     * failure unwinds through it. The row is then Running under this same attempt,
+     * so the step has not been lost: it is still this attempt's to conclude.
+     */
+    private function reclaimStepAfterProjectRollback(): void
+    {
+        if (! $this->stepAttemptMovedStep
+            || $this->step->state instanceof Running
+            || ! $this->attemptOwnershipApplies()) {
+            return;
+        }
+
+        try {
+            $row = Step::query()->whereKey($this->step->getKey())->first();
+        } catch (Throwable) {
+            return;
+        }
+
+        if ($row === null || ! ($row->state instanceof Running) || ! $this->failedAttemptIsCurrent($row)) {
+            return;
+        }
+
+        $this->stepAttemptMovedStep = false;
+        $this->stepOutcomeSavedBeforeFailure = false;
+        $this->stepStatusUpdated = false;
+
+        $this->returnCopyToRow($row);
+    }
+
+    /**
+     * In this order: asking setRawAttributes() to sync would sync before the cached
+     * state is cleared, and that cache would put the refused state straight back.
+     */
+    private function returnCopyToRow(?Step $row): void
+    {
+        $this->step->setRawAttributes($row?->getRawOriginal() ?? $this->step->getRawOriginal());
+        $this->step->syncOriginal();
+    }
+
+    /**
+     * Read-only check before a consumer hook. No lock is held across the hook,
+     * because hooks can make slow outside calls; the write that follows a hook
+     * goes through whileAttemptOwnsStep() and makes the authoritative check.
+     */
+    private function attemptIsSuperseded(): bool
+    {
+        if ($this->stepAttemptSuperseded) {
+            return true;
+        }
+
+        if (! $this->attemptOwnershipApplies()) {
+            return false;
+        }
+
+        if ($this->attemptOwnsRow(Step::query()->whereKey($this->step->getKey())->first())) {
+            return false;
+        }
+
+        $this->markAttemptSuperseded();
+
+        return true;
+    }
+
+    /**
+     * Ownership is only defined for an attempt claimed through handle(). A
+     * helper called directly keeps its plain behaviour.
+     */
+    private function attemptOwnershipApplies(): bool
+    {
+        return $this->stepAttemptStartedAt !== null;
+    }
+
+    /**
+     * A claimed attempt owns the row while it is Running in the attempt's own
+     * generation. A parent is the one exception: the dispatcher's sweep can
+     * complete it once its children conclude, while its compute() is still
+     * finishing. That attempt has not been replaced by anything, so it still
+     * stores its result and runs its hooks, but it no longer decides the outcome.
+     *
+     * An attempt that moved the row itself can no longer be compared by
+     * generation, because its own move changed it. It still finishes its run,
+     * for example storing the result returned after a retryJob(), but only
+     * while the row still shows that move: a successor's claim or an
+     * operator's cancel changes it. A consumer transaction that rolled the
+     * move back changes it too, until the consumer reloads its copy. The
+     * throttle flag tells this attempt's retry apart from a successor that
+     * rescheduled, which leaves the row Pending with the same retry count.
+     */
+    private function attemptOwnsRow(?Step $row): bool
+    {
+        if ($row === null) {
+            return false;
+        }
+
+        if ($this->stepAttemptMovedStep && ! ($this->step->state instanceof Running)) {
+            return get_class($row->state) === get_class($this->step->state)
+                && (int) $row->retries === (int) $this->step->retries
+                && (bool) $row->is_throttled === (bool) $this->step->is_throttled;
+        }
+
+        if (! $this->failedAttemptIsCurrent($row)) {
+            return false;
+        }
+
+        return $row->state instanceof Running
+            || ($row->state instanceof Completed && $row->isParent());
+    }
+
+    /**
+     * The dispatcher completed this parent under this attempt: the row is
+     * Completed and the attempt did not move it. attemptOwnsRow() refuses any
+     * other Completed row, and a helper called directly keeps its plain behaviour.
+     */
+    private function rowCompletedUnderAttempt(Step $row): bool
+    {
+        return $this->attemptOwnershipApplies()
+            && ! $this->stepAttemptMovedStep
+            && $row->state instanceof Completed;
+    }
+
+    /**
+     * Whether a failure this attempt reports stays on record only, because the
+     * dispatcher already completed this parent. The error text and duration are
+     * still stored; the outcome is not changed.
+     */
+    private function keepsCompletedResult(Step $row): bool
+    {
+        if (! $this->rowCompletedUnderAttempt($row)) {
+            return false;
+        }
+
+        $this->logKeptCompletedResult();
+
+        return true;
+    }
+
+    private function logKeptCompletedResult(): void
+    {
+        Step::log($this->step->id, 'states', 'Parent kept its completed result | the decision of its own job was not applied');
+
+        Log::warning('Parent step kept its completed result', [
+            'step_id' => $this->step->id,
+            'class' => static::class,
+        ]);
+    }
+
+    private function markAttemptSuperseded(): void
+    {
+        $this->stepAttemptSuperseded = true;
+        $this->stepStatusUpdated = true;
+
+        Step::log($this->step->id, 'states', sprintf(
+            'Obsolete attempt stopped writing | attempt_retries=%s | attempt_started_at=%s',
+            $this->stepAttemptRetries ?? 'n/a',
+            $this->stepAttemptStartedAt ?? 'n/a'
+        ));
+
+        Log::warning('Obsolete step attempt stopped writing', [
+            'step_id' => $this->step->id,
+            'class' => static::class,
+            'attempt_retries' => $this->stepAttemptRetries,
+            'attempt_started_at' => $this->stepAttemptStartedAt,
+        ]);
+    }
+
+    /**
      * Compare the queued dispatch generation with the locked row. A dispatch
-     * tick is the durable generation marker; retries are retained as a
-     * fallback for direct/manual dispatch paths without a tick row. Jobs
-     * without a snapshot (queued by an older release, or created outside the
-     * dispatcher) keep the legacy state-only behavior.
+     * tick is the durable generation marker, and a dispatch with no current
+     * tick is its own generation: the row must have no tick either. Retries
+     * cover redeliveries of the same tick. Jobs without a snapshot (queued by
+     * an older release, or created outside the dispatcher) keep the legacy
+     * state-only behavior.
      */
     private function queuedGenerationIsCurrent(Step $current): bool
     {
@@ -342,8 +651,9 @@ abstract class BaseStepJob implements ShouldQueue
             return true;
         }
 
-        if ($this->stepAttemptTickId !== null
-            && (int) $current->tick_id !== $this->stepAttemptTickId) {
+        $currentTickId = $current->tick_id === null ? null : (int) $current->tick_id;
+
+        if ($currentTickId !== $this->stepAttemptTickId) {
             return false;
         }
 
@@ -394,7 +704,23 @@ abstract class BaseStepJob implements ShouldQueue
         // the Running save, so a canceller that changes the state in between
         // either lands first (and the guards below see it) or waits and then
         // finds the step already Running. Never both.
-        $started = $this->step->getConnection()->transaction(fn (): bool => $this->claimStart());
+        //
+        // The claim runs up to three times. A deadlock rolls all of it back,
+        // and without another try the step would end Failed having never run.
+        $refusedByAncestor = false;
+
+        $started = $this->step->getConnection()->transaction(
+            function () use (&$refusedByAncestor): bool {
+                return $this->claimStart($refusedByAncestor);
+            },
+            3,
+        );
+
+        // Moved here rather than left to the skip sweep, which works one group
+        // at a time and would never reach a step whose ancestor is in another.
+        if ($refusedByAncestor) {
+            StepDispatcher::batchTransitionSteps([$this->step->getKey()], Skipped::class, [Running::class]);
+        }
 
         if (! $started) {
             return false;
@@ -409,8 +735,10 @@ abstract class BaseStepJob implements ShouldQueue
         return true;
     }
 
-    private function claimStart(): bool
+    private function claimStart(bool &$refusedByAncestor): bool
     {
+        $refusedByAncestor = false;
+
         Step::query()->whereKey($this->step->getKey())->lockForUpdate()->first(['id']);
 
         // Refresh step from database to get latest state (it should be Dispatched)
@@ -439,6 +767,18 @@ abstract class BaseStepJob implements ShouldQueue
         // the old job start would also leave its later failed() callback
         // rejected by the generation guard there.
         if (! $this->queuedGenerationIsCurrent($this->step)) {
+            return false;
+        }
+
+        // Nothing starts under a Skipped ancestor, whatever was true when the
+        // dispatcher chose this step. The caller moves the step to Skipped once
+        // this transaction ends. The ancestors stay share-locked until the
+        // Running save commits: see Step::hasSkippedAncestor.
+        if ($this->step->hasSkippedAncestor(holdRows: true)) {
+            Step::log($this->step->id, 'states', 'Start refused | an ancestor is Skipped');
+
+            $refusedByAncestor = true;
+
             return false;
         }
 

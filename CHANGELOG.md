@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.21.8 - 2026-11-06
+
+### Fixes
+- [BUG FIX] A worker that lost its step (recovered, stopped or cancelled elsewhere) no longer overwrites it: it writes nothing, runs no later hook and logs one warning.
+- [BUG FIX] A step lost during a start check does not begin its work, including `executeJobLogic()` and `compute()`.
+- [BUG FIX] Cancel, skip and resolver-promotion sweeps lock each row before changing it, so a cancel can no longer overwrite a step a worker has started.
+- [BUG FIX] Parent sweeps lock the parent and conclude it only while it is still Running, so a result a worker recorded first stands.
+- [BUG FIX] A parent's own job can no longer overwrite a result the dispatcher recorded. A job that fails afterwards leaves the parent Completed, with the error stored and a warning logged.
+- [BUG FIX] Skipped on a parent now means everything inside it was skipped: a skip is refused once any step inside has started, at any depth. The parent stays Running and ends by the usual rule.
+- [BUG FIX] Nothing is dispatched or started under a Skipped ancestor, at any depth. A worker refused for this reason moves its step to Skipped.
+- [BUG FIX] A project reaction that fails after a state was saved no longer undoes the result and runs once. A refused save or failed commit is not treated as saved, and the step ends Failed.
+- [BUG FIX] A retry count and its state are written by one save, so a refused retry leaves no raised count.
+- [BUG FIX] A worker's start claim runs up to three times after a deadlock, instead of failing a step that never ran.
+- [BUG FIX] A dispatch with no current tick clears `tick_id`, so it cannot pass for the earlier dispatch that stamped it.
+- [BUG FIX] The critical stuck alert for Dispatched steps fires only when recovery already rescued every step in the batch, judged by the note each rescue leaves. Ordinary retries no longer count.
+- [BUG FIX] One parent whose conclusion fails no longer aborts the sweep, and a resolver that cannot be promoted no longer ends the tick or hides the failing blocks behind it.
+- [BUG FIX] Prefixed dispatcher cache keys gain a separator, so prefix `trading` with group `alpha` stays apart from an unprefixed group `trading_alpha`.
+- [BUG FIX] Parent completion looks at each child block once, so a `child_block_uuid` cycle cannot exhaust memory.
+- [BUG FIX] The timestamp migration's rollback no longer runs a MySQL-only statement on SQLite, and the exception-triage upgrade no longer skips prefixed tables whose prefix contains `dispatcher`.
+
+### Improvements
+- [IMPROVED] New `tests/Collision` suite runs competing PHP processes on real MySQL, or on Postgres with `STEP_DISPATCHER_COLLISION_DRIVER=pgsql`. It skips with the reason when no server is reachable.
+- [IMPROVED] New `tests/Feature/Scenarios` suite pins the workflow rules across dispatch, retries, parents, sweeps and recovery.
+- [IMPROVED] README, PROJECT and configuration comments corrected against the code.
+
 ## 1.21.7 - 2026-11-02
 
 ### Fixed

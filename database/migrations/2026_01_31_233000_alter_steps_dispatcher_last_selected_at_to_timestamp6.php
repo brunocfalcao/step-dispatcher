@@ -37,6 +37,11 @@ return new class extends Migration
     {
         $driver = DB::getDriverName();
 
+        // up() made no change on SQLite, so there is nothing to revert there.
+        if ($driver === 'sqlite') {
+            return;
+        }
+
         if ($driver === 'pgsql') {
             DB::statement('ALTER TABLE steps_dispatcher ALTER COLUMN last_selected_at TYPE TIMESTAMP WITHOUT TIME ZONE');
         } else {

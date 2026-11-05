@@ -21,6 +21,15 @@ final class DoubleCheckTestJob extends BaseStepJob
 
     public static int $computeRuns = 0;
 
+    public static int $startDelayMicroseconds = 0;
+
+    public function startOrSkip(): bool
+    {
+        usleep(static::$startDelayMicroseconds);
+
+        return true;
+    }
+
     protected function compute(): mixed
     {
         static::$computeRuns++;
@@ -37,5 +46,6 @@ final class DoubleCheckTestJob extends BaseStepJob
     {
         static::$pass = true;
         static::$computeRuns = 0;
+        static::$startDelayMicroseconds = 0;
     }
 }

@@ -29,18 +29,25 @@ trait HandlesStepExceptions
 
         $parser = ExceptionParser::with($e);
 
-        // A stale-detector requeue note only says an earlier attempt
-        // stalled; the failure of this attempt is the error worth keeping.
-        // A message the job wrote itself still wins.
-        if (is_null($this->step->error_message) || self::isRequeueNote($this->step->error_message)) {
-            $this->step->update([
-                'error_message' => $parser->friendlyMessage(),
-                'error_stack_trace' => $parser->stackTrace(),
-            ]);
-        }
+        $this->whileAttemptOwnsStep(function (Step $row) use ($parser): void {
+            // A stale-detector requeue note only says an earlier attempt
+            // stalled; the failure of this attempt is the error worth keeping.
+            // A message the job wrote itself still wins.
+            if (is_null($this->step->error_message) || self::isRequeueNote($this->step->error_message)) {
+                $this->step->update([
+                    'error_message' => $parser->friendlyMessage(),
+                    'error_stack_trace' => $parser->stackTrace(),
+                ]);
+            }
 
-        $this->finalizeDuration();
-        $this->step->state->transitionTo(Failed::class);
+            $this->finalizeDuration();
+
+            if ($this->keepsCompletedResult($row)) {
+                return;
+            }
+
+            $this->step->state->transitionTo(Failed::class);
+        }, runsOnCompletedParent: true);
     }
 
     private static function isRequeueNote(string $message): bool
@@ -61,6 +68,28 @@ trait HandlesStepExceptions
             class_basename($e),
             mb_substr($e->getMessage(), 0, 300)
         ));
+
+        $this->reclaimStepAfterProjectRollback();
+
+        // This attempt's outcome is saved, and the failure came from a project's
+        // reaction to it. Nothing is left to decide or to retry: the error goes
+        // on record and the queue still hears about the failure.
+        if ($this->stepOutcomeSavedBeforeFailure) {
+            try {
+                $this->logExceptionToStep($e);
+            } catch (Throwable) {
+                // The failure already being reported is the one that matters.
+            }
+
+            throw $e;
+        }
+
+        // A failure in an attempt that has already lost its step belongs to
+        // nobody: failed() skips resolveException() in this case too, and the
+        // attempt that owns the row now decides the step's outcome.
+        if ($this->attemptIsSuperseded()) {
+            return;
+        }
 
         if ($this->isShortcutException($e)) {
             Step::log($stepId === 'unknown' ? null : $stepId, 'exceptions', 'Handler decision: shortcut (MaxRetriesReached)');
@@ -96,7 +125,9 @@ trait HandlesStepExceptions
         $this->logExceptionToStep($e);
 
         // Hook for subclasses to add custom exception logging (e.g., appLog on relatable)
-        $this->onExceptionLogged($e);
+        if (! $this->stepAttemptSuperseded) {
+            $this->onExceptionLogged($e);
+        }
 
         $this->resolveExceptionIfPossible($e);
 
@@ -184,12 +215,14 @@ trait HandlesStepExceptions
 
     protected function resolveExceptionIfPossible(Throwable $e): void
     {
-        if (method_exists($this, 'resolveException')) {
+        if (method_exists($this, 'resolveException') && ! $this->attemptIsSuperseded()) {
             $this->resolveException($e);
         }
 
         // External handler hook (e.g., API exception handler)
-        $this->externalResolveException($e);
+        if (! $this->attemptIsSuperseded()) {
+            $this->externalResolveException($e);
+        }
     }
 
     // ========================================================================
@@ -236,17 +269,18 @@ trait HandlesStepExceptions
             return;
         }
 
-        $this->finalizeDuration();
+        $this->whileAttemptOwnsStep(function (Step $row): void {
+            $this->finalizeDuration();
 
-        // Same rule as completeIfNotHandled(): an unconcluded parent stays
-        // Running for the dispatcher's transitionParentsToComplete sweep.
-        if ($this->parentMustAwaitChildren()) {
-            $this->stepStatusUpdated = true;
+            // Same rule as completeIfNotHandled(): an unconcluded parent stays
+            // Running for the dispatcher's transitionParentsToComplete sweep.
+            if ($this->rowCompletedUnderAttempt($row) || $this->parentMustAwaitChildren()) {
+                return;
+            }
 
-            return;
-        }
+            $this->step->state->transitionTo(Completed::class);
+        }, runsOnCompletedParent: true);
 
-        $this->step->state->transitionTo(Completed::class);
         $this->stepStatusUpdated = true;
     }
 
@@ -263,17 +297,19 @@ trait HandlesStepExceptions
 
         $parser = ExceptionParser::with($e);
 
-        if (is_null($this->step->error_message)) {
-            $this->step->updateSaving([
-                'error_message' => $parser->friendlyMessage(),
-            ]);
-        }
+        $this->whileAttemptOwnsStep(function () use ($parser): void {
+            if (is_null($this->step->error_message)) {
+                $this->step->updateSaving([
+                    'error_message' => $parser->friendlyMessage(),
+                ]);
+            }
 
-        if (is_null($this->step->error_stack_trace)) {
-            $this->step->updateSaving([
-                'error_stack_trace' => $parser->stackTrace(),
-            ]);
-        }
+            if (is_null($this->step->error_stack_trace)) {
+                $this->step->updateSaving([
+                    'error_stack_trace' => $parser->stackTrace(),
+                ]);
+            }
+        }, runsOnCompletedParent: true);
     }
 
     /**

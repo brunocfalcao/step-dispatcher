@@ -6,6 +6,7 @@ namespace StepDispatcher\Concerns\BaseStepJob;
 
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
 use StepDispatcher\Exceptions\MaxRetriesReachedException;
 use StepDispatcher\Models\Step;
 use StepDispatcher\States\Completed;
@@ -29,40 +30,74 @@ trait HandlesStepLifecycle
 
     public function stopJob(): void
     {
-        $this->finalizeDuration();
-        $this->step->state->transitionTo(Stopped::class);
+        $this->whileAttemptOwnsStep(function (): void {
+            $this->finalizeDuration();
+            $this->step->state->transitionTo(Stopped::class);
+        });
+
         $this->stepStatusUpdated = true;
     }
 
+    /**
+     * A parent with something inside it that has started cannot become Skipped.
+     * Its skip is refused: it stays Running and ends by the usual parent rule
+     * once its children conclude.
+     */
     public function skipJob(): void
     {
-        $this->finalizeDuration();
-        $this->step->state->transitionTo(Skipped::class);
+        $this->whileAttemptOwnsStep(function (Step $row): void {
+            if ($row->hasChildThatStarted()) {
+                $this->logRefusedSkip();
+
+                return;
+            }
+
+            $this->finalizeDuration();
+            $this->step->state->transitionTo(Skipped::class);
+        });
+
         $this->stepStatusUpdated = true;
+    }
+
+    private function logRefusedSkip(): void
+    {
+        Step::log($this->step->id, 'states', 'Skip refused | a step inside this parent has started');
+
+        Log::warning('Step skip refused because a step inside this parent has started', [
+            'step_id' => $this->step->id,
+            'class' => static::class,
+            'child_block_uuid' => $this->step->child_block_uuid,
+        ]);
     }
 
     public function retryJob(Carbon|CarbonImmutable|null $dispatchAfter = null): void
     {
         $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
-        // Check if step should be escalated to high priority
-        if ($this->shouldChangeToHighPriority()) {
-            $this->step->update(['priority' => 'high']);
-        }
+        // Check if step should be escalated to high priority. This hook can be
+        // overridden, so it runs before the row lock is taken.
+        $escalate = ! $this->stepAttemptSuperseded && $this->shouldChangeToHighPriority();
+        $backoffLabel = $this->resolveBackoffLabel();
 
-        $this->step->update([
-            'dispatch_after' => $dispatchTime,
-            'is_throttled' => false,  // Ensure transition WILL increment retries
-        ]);
+        $this->whileAttemptOwnsStep(function () use ($dispatchTime, $escalate, $backoffLabel): void {
+            if ($escalate) {
+                $this->step->update(['priority' => 'high']);
+            }
 
-        Step::log($this->step->id, 'retries', sprintf(
-            'Retry scheduled | retries=%d | backoff=%s | dispatch_after=%s',
-            (int) $this->step->retries + 1,
-            $this->resolveBackoffLabel(),
-            $dispatchTime->format('H:i:s.u')
-        ));
+            $this->step->update([
+                'dispatch_after' => $dispatchTime,
+                'is_throttled' => false,  // Ensure transition WILL increment retries
+            ]);
 
-        $this->step->state->transitionTo(Pending::class);
+            Step::log($this->step->id, 'retries', sprintf(
+                'Retry scheduled | retries=%d | backoff=%s | dispatch_after=%s',
+                (int) $this->step->retries + 1,
+                $backoffLabel,
+                $dispatchTime->format('H:i:s.u')
+            ));
+
+            $this->step->state->transitionTo(Pending::class);
+        });
 
         $this->stepStatusUpdated = true;
     }
@@ -71,35 +106,44 @@ trait HandlesStepLifecycle
     {
         $dispatchTime = $dispatchAfter ?? $this->resolveNextDispatchTime();
 
-        // Check if step should be escalated to high priority
-        if ($this->shouldChangeToHighPriority()) {
-            $this->step->update(['priority' => 'high']);
-        }
+        // Check if step should be escalated to high priority. This hook can be
+        // overridden, so it runs before the row lock is taken.
+        $escalate = ! $this->stepAttemptSuperseded && $this->shouldChangeToHighPriority();
+        $backoffLabel = $this->resolveBackoffLabel();
 
-        // Set dispatch_after and throttling flags BEFORE transition
-        $this->step->dispatch_after = $dispatchTime;
-        $this->step->was_throttled = true;  // Historical: step has been throttled at least once
-        $this->step->is_throttled = true;   // Current: step is currently waiting due to throttling
+        $this->whileAttemptOwnsStep(function () use ($dispatchTime, $escalate, $backoffLabel): void {
+            if ($escalate) {
+                $this->step->update(['priority' => 'high']);
+            }
 
-        $this->step->save();
+            // Set dispatch_after and throttling flags BEFORE transition
+            $this->step->dispatch_after = $dispatchTime;
+            $this->step->was_throttled = true;  // Historical: step has been throttled at least once
+            $this->step->is_throttled = true;   // Current: step is currently waiting due to throttling
 
-        Step::log($this->step->id, 'throttled', sprintf(
-            'Throttled | backoff=%s | dispatch_after=%s | queue=%s',
-            $this->resolveBackoffLabel(),
-            $dispatchTime->format('H:i:s.u'),
-            $this->step->queue ?? 'default'
-        ));
+            $this->step->save();
 
-        // Use proper transition! The is_throttled flag signals to NOT increment retries
-        $this->step->state->transitionTo(Pending::class);
+            Step::log($this->step->id, 'throttled', sprintf(
+                'Throttled | backoff=%s | dispatch_after=%s | queue=%s',
+                $backoffLabel,
+                $dispatchTime->format('H:i:s.u'),
+                $this->step->queue ?? 'default'
+            ));
+
+            // Use proper transition! The is_throttled flag signals to NOT increment retries
+            $this->step->state->transitionTo(Pending::class);
+        });
 
         $this->stepStatusUpdated = true;
     }
 
     public function retryForConfirmation(): void
     {
-        $this->step->update(['execution_mode' => 'confirming-completion']);
-        $this->step->state->transitionTo(Pending::class);
+        $this->whileAttemptOwnsStep(function (): void {
+            $this->step->update(['execution_mode' => 'confirming-completion']);
+            $this->step->state->transitionTo(Pending::class);
+        });
+
         $this->stepStatusUpdated = true;
     }
 
@@ -177,27 +221,31 @@ trait HandlesStepLifecycle
 
     protected function shouldStartOrStop(): bool
     {
-        return ! method_exists($this, 'startOrStop') || $this->startOrStop() !== false;
+        return ! method_exists($this, 'startOrStop') || $this->attemptIsSuperseded() || $this->startOrStop() !== false;
     }
 
     protected function shouldStartOrSkip(): bool
     {
-        return ! method_exists($this, 'startOrSkip') || $this->startOrSkip() !== false;
+        return ! method_exists($this, 'startOrSkip') || $this->attemptIsSuperseded() || $this->startOrSkip() !== false;
     }
 
     protected function shouldStartOrFail(): bool
     {
-        return ! method_exists($this, 'startOrFail') || $this->startOrFail() !== false;
+        return ! method_exists($this, 'startOrFail') || $this->attemptIsSuperseded() || $this->startOrFail() !== false;
     }
 
     protected function shouldStartOrRetry(): bool
     {
-        return ! method_exists($this, 'startOrRetry') || $this->startOrRetry() !== false;
+        return ! method_exists($this, 'startOrRetry') || $this->attemptIsSuperseded() || $this->startOrRetry() !== false;
     }
 
     protected function shouldConfirmOrRetry(): bool
     {
-        return ! method_exists($this, 'confirmOrRetry') || $this->confirmOrRetry() !== false;
+        if (! method_exists($this, 'confirmOrRetry') || $this->attemptIsSuperseded()) {
+            return true;
+        }
+
+        return $this->confirmOrRetry() !== false;
     }
 
     protected function shouldComplete(): void
@@ -208,7 +256,7 @@ trait HandlesStepLifecycle
             return;
         }
 
-        if (method_exists($this, 'complete')) {
+        if (method_exists($this, 'complete') && ! $this->attemptIsSuperseded()) {
             $this->complete();
         }
     }
@@ -223,6 +271,10 @@ trait HandlesStepLifecycle
             return false;
         }
 
+        if ($this->attemptIsSuperseded()) {
+            return true;
+        }
+
         // Exhausted double-check budget. Pre-fix, this branch fell
         // through to needsVerification()=false → finalizeJobExecution()
         // → shouldComplete() — the step was COMPLETED even though
@@ -233,23 +285,32 @@ trait HandlesStepLifecycle
         // workflow advances against unverified state. Fail the step
         // explicitly so the parent's resolve-exception path runs.
         if ($this->step->double_check >= 2) {
-            $this->step->update([
-                'error_message' => 'doubleCheck() failed twice — verification budget exhausted without confirmation',
-            ]);
-            $this->step->state->transitionTo(Failed::class);
+            $this->whileAttemptOwnsStep(function (Step $row): void {
+                $this->step->update([
+                    'error_message' => 'doubleCheck() failed twice — verification budget exhausted without confirmation',
+                ]);
+                $this->finalizeDuration();
+
+                if ($this->keepsCompletedResult($row)) {
+                    return;
+                }
+
+                $this->step->state->transitionTo(Failed::class);
+            }, runsOnCompletedParent: true);
+
             $this->stepStatusUpdated = true;
 
             return true;
         }
 
         if ($this->doubleCheck() === false) {
-            $this->step->increment('double_check');
+            $this->whileAttemptOwnsStep(fn () => $this->step->increment('double_check'), runsOnCompletedParent: true);
             $this->retryJob();
 
             return true;
         }
 
-        $this->step->update(['double_check' => 99]);
+        $this->whileAttemptOwnsStep(fn () => $this->step->update(['double_check' => 99]), runsOnCompletedParent: true);
 
         return false;
     }
@@ -261,7 +322,7 @@ trait HandlesStepLifecycle
 
     protected function confirmCompletionOrRetry(): void
     {
-        if (! method_exists($this, 'confirmOrRetry')) {
+        if (! method_exists($this, 'confirmOrRetry') || $this->attemptIsSuperseded()) {
             return;
         }
 
@@ -282,15 +343,16 @@ trait HandlesStepLifecycle
             return;
         }
 
-        $this->finalizeDuration();
+        $this->whileAttemptOwnsStep(function (Step $row): void {
+            $this->finalizeDuration();
 
-        if ($this->parentMustAwaitChildren()) {
-            $this->stepStatusUpdated = true;
+            if ($this->rowCompletedUnderAttempt($row) || $this->parentMustAwaitChildren()) {
+                return;
+            }
 
-            return;
-        }
+            $this->step->state->transitionTo(Completed::class);
+        }, runsOnCompletedParent: true);
 
-        $this->step->state->transitionTo(Completed::class);
         $this->stepStatusUpdated = true;
     }
 
@@ -312,6 +374,12 @@ trait HandlesStepLifecycle
 
     protected function computeAndStoreResult(): void
     {
+        // A step lost during a start check must not begin its work: for an
+        // exchange-facing job, that work is the order.
+        if ($this->attemptIsSuperseded()) {
+            return;
+        }
+
         $result = $this->compute();
 
         // Only `null` means "nothing to store". Falsy results (0, false,
@@ -321,8 +389,8 @@ trait HandlesStepLifecycle
             return;
         }
 
-        $this->step->update([
-            'response' => $this->formatResultForStorage($result),
-        ]);
+        $response = $this->formatResultForStorage($result);
+
+        $this->whileAttemptOwnsStep(fn () => $this->step->update(['response' => $response]), runsOnCompletedParent: true);
     }
 }

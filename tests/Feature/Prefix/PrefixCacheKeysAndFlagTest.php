@@ -33,13 +33,13 @@ it('startDispatch under different prefixes writes distinct cache keys for the sa
         StepsDispatcher::startDispatch('alpha');
     });
 
-    expect(Cache::has('current_tick_id:trading_alpha'))->toBeTrue(
+    expect(Cache::has('current_tick_id:trading_|alpha'))->toBeTrue(
         'Trading dispatcher must own a distinct cache key. Without '
         .'the prefix component the calc tick id below would have '
         .'overwritten this entry — silent cross-tier data corruption.'
     );
 
-    expect(Cache::has('current_tick_id:calc_alpha'))->toBeTrue(
+    expect(Cache::has('current_tick_id:calc_|alpha'))->toBeTrue(
         'Calc dispatcher gets its own key because the cache key '
         .'embeds the runtime prefix.'
     );
@@ -48,6 +48,26 @@ it('startDispatch under different prefixes writes distinct cache keys for the sa
         'No prefixed dispatcher should ever write to the legacy '
         .'unprefixed key — that namespace belongs to default-prefix '
         .'hosts (existing single-dispatcher installs).'
+    );
+});
+
+it('keeps a prefixed dispatcher apart from an unprefixed group with the same spelling', function () {
+    Steps::usingPrefix('trading', function (): void {
+        StepsDispatcher::startDispatch('alpha');
+    });
+
+    StepsDispatcher::startDispatch('trading_alpha');
+
+    $prefixedTick = Cache::get('current_tick_id:trading_|alpha');
+    $unprefixedTick = Cache::get('current_tick_id:trading_alpha');
+
+    expect($prefixedTick)->not->toBeNull()
+        ->and($unprefixedTick)->not->toBeNull();
+
+    StepsDispatcher::endDispatch(8, 'trading_alpha');
+
+    expect(Cache::get('current_tick_id:trading_|alpha'))->toBe($prefixedTick,
+        'The unprefixed tick ending must not drop the prefixed tick marker.'
     );
 });
 
@@ -64,11 +84,11 @@ it('endDispatch clears only the cache keys it own', function () {
         StepsDispatcher::endDispatch(8, 'alpha');
     });
 
-    expect(Cache::has('current_tick_id:trading_alpha'))->toBeFalse(
+    expect(Cache::has('current_tick_id:trading_|alpha'))->toBeFalse(
         'Trading endDispatch cleared its own key.'
     );
 
-    expect(Cache::has('current_tick_id:calc_alpha'))->toBeTrue(
+    expect(Cache::has('current_tick_id:calc_|alpha'))->toBeTrue(
         'Calc dispatcher tick is still in flight — its cache key '
         .'must remain untouched. A cross-prefix forget() would be '
         .'a regression.'

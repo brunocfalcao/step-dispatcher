@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Support;
 
-use Exception;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -555,11 +554,10 @@ final class StepDispatcher
             try {
                 $areConcluded = $step->childStepsAreConcludedFromMap($childStepsByBlock, forCompletion: true);
 
-                if ($areConcluded) {
-                    $step->state->transitionTo(Completed::class);
+                if ($areConcluded && self::concludeRunningParent($step, Completed::class)) {
                     $changed = true;
                 }
-            } catch (Exception $e) {
+            } catch (Throwable $e) {
                 // Don't let a single parent's transition failure abort the
                 // whole sweep — other parents may still resolve cleanly. But
                 // surface the failure so operators can diagnose a parent
@@ -613,10 +611,11 @@ final class StepDispatcher
 
         // Only consider non-terminal descendants — terminal -> Skipped is
         // rejected by the state machine (silently swallowed by
-        // batchTransitionSteps) and counts as zero work done.
+        // batchTransitionSteps) and counts as zero work done. A Running step
+        // has started, so it is left to finish with its real result.
         $descendantIds = Step::whereIn('block_uuid', $allChildBlocks)
             ->forGroup($group)
-            ->whereNotIn('state', Step::terminalStepStates())
+            ->whereNotIn('state', [...Step::terminalStepStates(), Running::class])
             ->pluck('id')
             ->all();
 
@@ -630,7 +629,7 @@ final class StepDispatcher
         // the dispatcher before its dispatch phase, forever (the F2 wedge
         // class from the 2026-04-25 incident, re-armed via Dispatched rows
         // until DispatchedToSkipped existed).
-        return self::batchTransitionSteps($descendantIds, Skipped::class) > 0;
+        return self::batchTransitionSteps($descendantIds, Skipped::class, [Running::class]) > 0;
     }
 
     /**
@@ -726,17 +725,54 @@ final class StepDispatcher
 
             $childIds = $concludedChildSteps->pluck('id')->join(', ');
 
-            // Set error message before transitioning
-            $parentStep->update([
-                'error_message' => "Child step(s) {$label}: [{$childIds}]",
-            ]);
-
-            $parentStep->state->transitionTo($childOutcome);
-
-            return true;
+            // Only a clean move ends the tick. A parent a worker already
+            // concluded, or one whose reaction failed, gives way to the next
+            // parent and to the rest of the tick.
+            try {
+                if (self::concludeRunningParent($parentStep, $childOutcome, "Child step(s) {$label}: [{$childIds}]")) {
+                    return true;
+                }
+            } catch (Throwable $e) {
+                Log::error('transitionParentsOnChildOutcome failed for parent step', [
+                    'step_id' => $parentStep->id,
+                    'class' => $parentStep->class,
+                    'block_uuid' => $parentStep->block_uuid,
+                    'child_block_uuid' => $parentStep->child_block_uuid,
+                    'group' => $group,
+                    'target_state' => $childOutcome,
+                    'exception' => get_class($e),
+                    'message' => $e->getMessage(),
+                ]);
+            }
         }
 
         return false;
+    }
+
+    /**
+     * Conclude a running parent with its row locked from the state read to the
+     * save. A worker that recorded a result first keeps it: the parent is no
+     * longer Running here, so it stays as it is. Returns whether the parent
+     * moved cleanly. A reaction that fails after the save throws, and the result
+     * stands; a save that never happened leaves the parent Running for a later
+     * tick.
+     */
+    private static function concludeRunningParent(Step $parent, string $toState, ?string $errorMessage = null): bool
+    {
+        return Step::whileRowLocked($parent->getKey(), static function (?Step $locked) use ($toState, $errorMessage): bool {
+            if (! $locked?->state instanceof Running) {
+                return false;
+            }
+
+            // Set error message before transitioning: listeners read it when the state changes.
+            if ($errorMessage !== null) {
+                $locked->update(['error_message' => $errorMessage]);
+            }
+
+            $locked->state->transitionTo($toState);
+
+            return true;
+        });
     }
 
     /**
@@ -814,7 +850,11 @@ final class StepDispatcher
 
                 // Cancel child blocks
                 foreach ($parentSteps as $parentStep) {
-                    self::cancelChildBlockSteps($parentStep, $group);
+                    // A parent whose worker claimed it first was not cancelled,
+                    // so its children stay.
+                    if ($parentStep->fresh()?->state instanceof Cancelled) {
+                        self::cancelChildBlockSteps($parentStep, $group);
+                    }
                 }
             }
         }
@@ -869,27 +909,32 @@ final class StepDispatcher
             return false;
         }
 
-        $block = $failingBlocks->first();
+        foreach ($failingBlocks as $block) {
+            $stepIds = Step::where('block_uuid', $block)
+                ->forGroup($group)
+                ->where('type', 'resolve-exception')
+                ->where('state', NotRunnable::class)
+                ->pluck('id')
+                ->all();
 
-        $stepIds = Step::where('block_uuid', $block)
-            ->forGroup($group)
-            ->where('type', 'resolve-exception')
-            ->where('state', NotRunnable::class)
-            ->pluck('id')
-            ->all();
+            if (empty($stepIds)) {
+                // Race: another tick / worker promoted the resolve-exception
+                // between the candidate-blocks scan above and this re-query.
+                // Returning true on this no-op path would block the dispatch
+                // phase for the rest of the tick — same wedge class as the
+                // skipAll* phase. Move on instead.
+                continue;
+            }
 
-        if (empty($stepIds)) {
-            // Race: another tick / worker promoted the resolve-exception
-            // between the candidate-blocks scan above and this re-query.
-            // Returning true on this no-op path would block the dispatch
-            // phase for the rest of the tick — same wedge class as the
-            // skipAll* phase. Yield to the next phase instead.
-            return false;
+            // Only a transition that really happened counts as work. A block
+            // whose resolver cannot be promoted must not end the tick, or hide
+            // the failing blocks behind it.
+            if (self::batchTransitionSteps($stepIds, Pending::class) > 0) {
+                return true;
+            }
         }
 
-        self::batchTransitionSteps($stepIds, Pending::class);
-
-        return true;
+        return false;
     }
 
     /**
@@ -1027,8 +1072,14 @@ final class StepDispatcher
      * not the candidate list size — a candidate whose transition throws
      * (unregistered edge) is zero work, and treating it as progress
      * re-selects it forever and starves the dispatch phase.
+     *
+     * A step found under the row lock in one of $leaveAloneIn states stays as
+     * it is: a caller's earlier read may no longer hold by the time the row is
+     * locked.
+     *
+     * @param  list<class-string>  $leaveAloneIn
      */
-    public static function batchTransitionSteps(array $stepIds, string $toState): int
+    public static function batchTransitionSteps(array $stepIds, string $toState, array $leaveAloneIn = []): int
     {
         if (empty($stepIds)) {
             return 0;
@@ -1036,24 +1087,42 @@ final class StepDispatcher
 
         $transitioned = 0;
 
-        $steps = Step::whereIn('id', $stepIds)->get();
+        foreach ($stepIds as $stepId) {
+            $step = null;
 
-        foreach ($steps as $step) {
             try {
-                // Use proper state transition - triggers transition class handle() and observers
-                $step->state->transitionTo($toState);
-                $transitioned++;
-            } catch (Exception $e) {
+                // The row stays locked from the state read to the save, as in a
+                // worker's start claim. A worker that got there first is seen
+                // here and the state machine refuses the change; one that comes
+                // later waits and then finds the new state. Each row has its own
+                // transaction, so no lock is held across the batch.
+                $moved = Step::whileRowLocked($stepId, static function (?Step $locked) use ($toState, $leaveAloneIn, &$step): bool {
+                    $step = $locked;
+
+                    if ($step === null || in_array(get_class($step->state), $leaveAloneIn, strict: true)) {
+                        return false;
+                    }
+
+                    // Use proper state transition - triggers transition class handle() and observers
+                    $step->state->transitionTo($toState);
+
+                    return true;
+                });
+
+                if ($moved) {
+                    $transitioned++;
+                }
+            } catch (Throwable $e) {
                 // Log step id, current/target state, group, class, and
                 // exception so the operator can diagnose dispatcher
                 // wedges. Pre-fix the catch was silent — a stuck step
                 // would show up on the dashboard with no breadcrumb to
                 // explain why the cleanup phase failed to clear it.
                 Log::channel('jobs')->warning('[StepDispatcher::batchTransitionSteps] transition failed — continuing batch', [
-                    'step_id' => $step->id,
-                    'class' => $step->class ?? null,
-                    'group' => $step->group ?? null,
-                    'current_state' => is_object($step->state) ? get_class($step->state) : (string) $step->state,
+                    'step_id' => $stepId,
+                    'class' => $step?->class,
+                    'group' => $step?->group,
+                    'current_state' => is_object($step?->state) ? get_class($step->state) : (string) $step?->state,
                     'target_state' => $toState,
                     'exception' => $e::class,
                     'message' => $e->getMessage(),
@@ -1091,7 +1160,8 @@ final class StepDispatcher
         // Include the runtime prefix in the cache key so two
         // dispatchers running different prefixes but sharing a group
         // name (`trading_alpha` vs `calc_alpha`) don't stomp each
-        // other's saturation counters.
+        // other's saturation counters. The Kraite saturation flusher reads
+        // keys in this exact format, so this name is a consumer contract.
         $runtimePrefix = app(RuntimeContext::class)->current();
         $prefix = "dispatcher:saturation:{$runtimePrefix}{$groupKey}:{$bucket}";
 
@@ -1157,6 +1227,24 @@ final class StepDispatcher
             ->get()
             ->keyBy('child_block_uuid');
 
+        // The rest of the chain above those parents, one query per level, so
+        // that a Skipped ancestor at any depth is visible without a query per
+        // step. Only the columns that walk reads.
+        $seenBlocks = $blockUuids->all();
+        $blocksToClimb = $parentsByChildBlock->pluck('block_uuid')->unique()->diff($seenBlocks)->values();
+
+        while ($blocksToClimb->isNotEmpty()) {
+            $seenBlocks = array_merge($seenBlocks, $blocksToClimb->all());
+
+            $ancestors = Step::whereIn('child_block_uuid', $blocksToClimb)
+                ->forGroup($group)
+                ->get(['id', 'state', 'block_uuid', 'child_block_uuid'])
+                ->keyBy('child_block_uuid');
+
+            $parentsByChildBlock = $parentsByChildBlock->union($ancestors);
+            $blocksToClimb = $ancestors->pluck('block_uuid')->unique()->diff($seenBlocks)->values();
+        }
+
         $blockSteps = Step::whereIn('block_uuid', $blockUuids)
             ->forGroup($group)
             ->get();
@@ -1212,6 +1300,11 @@ final class StepDispatcher
                 return false;
             }
 
+            // Nothing starts under a Skipped ancestor, at any depth and of any type.
+            if (self::hasSkippedAncestorInCache($step->block_uuid, $parentsByChildBlock)) {
+                return false;
+            }
+
             // 1. resolve-exception without index → always dispatch
             if ($step->type === 'resolve-exception' && is_null($step->index)) {
                 return true;
@@ -1259,6 +1352,31 @@ final class StepDispatcher
             // 5. Parent step (remaining case: not orphan, not child)
             return self::previousIndexConcludedBatch($step, $concludedIndicesByBlock, $pendingResolveExceptions);
         });
+    }
+
+    /**
+     * Whether any step above the given block is Skipped, read from the
+     * parents buildStepsCache() loaded. The walk stops at a block it has
+     * already seen, because nothing in the schema prevents a loop.
+     *
+     * @param  Collection<string, Step>  $parentsByChildBlock
+     */
+    public static function hasSkippedAncestorInCache(?string $block, Collection $parentsByChildBlock): bool
+    {
+        $seen = [];
+
+        while ($block !== null && ! isset($seen[$block]) && isset($parentsByChildBlock[$block])) {
+            $seen[$block] = true;
+            $parent = $parentsByChildBlock[$block];
+
+            if ($parent->state instanceof Skipped) {
+                return true;
+            }
+
+            $block = $parent->block_uuid;
+        }
+
+        return false;
     }
 
     /**

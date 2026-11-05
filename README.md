@@ -1,5 +1,20 @@
 # step-dispatcher
 
+## Changes in v1.21.8
+
+A worker that lost its step while running (recovered, stopped or cancelled
+elsewhere) no longer overwrites it. It writes nothing, runs no later hook and
+logs one warning. Dispatcher sweeps now lock each row from the state read to the
+save, so a cancel can no longer overwrite a step a worker has started, and a
+result a worker recorded first stands.
+
+Skipped on a parent now means everything inside it was skipped. A skip is refused
+once any step inside the parent has started, at any depth, and nothing is
+dispatched or started under a Skipped ancestor. See
+[Job lifecycle](#job-lifecycle). The new `tests/Collision` suite proves these
+races on real MySQL and Postgres. See
+[Development and verification](#development-and-verification).
+
 ## Changes in v1.21.7
 
 `steps:recover-stale --release-locks` now releases each stale dispatcher lock
@@ -149,14 +164,18 @@ worker manager, benchmark guarantee, or automatic external API throttler.
 - Illuminate Support, Database, Console, and Queue `^11.0|^12.0|^13.0`.
 - `spatie/laravel-model-states` `^2.0`.
 
-The current development suite uses Laravel 13 through Testbench 11 and Pest 5,
+The PHP and Illuminate ranges above are the package's runtime requirements.
+Working on the package itself needs more: its development suite uses Laravel 13
+through Testbench 11 (PHP 8.3 or newer) and Pest 5 (PHP 8.4 or newer),
 with SQLite in memory. Database-specific exception handlers cover MySQL/MariaDB,
 PostgreSQL, and SQLite; an unrecognized driver receives the generic handler.
 This is not a claim that every supported framework/database combination has a
 committed CI matrix. Validate your chosen engine's locking, recursive CTE,
 timestamp, and queue behavior before relying on it in production.
 SQLite's Laravel grammar ignores row-lock clauses; the in-memory suite does not
-prove the row-lock behavior of a production database.
+prove the row-lock behavior of a production database. The separate
+[collision suite](#development-and-verification) exercises it on MySQL and
+Postgres.
 
 Asynchronous work needs a configured Laravel queue connection and worker.
 Horizon and Redis are host application choices, not package requirements.
@@ -376,8 +395,21 @@ new UUID without storing it.
 The dispatcher propagates failed/stopped child outcomes to parents, cancels
 blocked later work and waiting descendants, and skips descendants of skipped
 parents. These sweeps do not forcibly stop already Running jobs. Terminal queue
-payloads are ignored when they eventually reach the worker. Nested block
+payloads are ignored when they eventually reach the worker.
+
+Skipped on a parent means everything inside it was skipped. A parent cannot become
+Skipped once any step inside it, at any depth, has started: it reached Dispatched
+or a later working state, or it was retried or rescheduled. A retry or a reschedule
+keeps it counted, including after it later ends Cancelled or Skipped. The parent's
+skip is refused and logged, it stays Running, and it ends by the usual parent rule
+once its children conclude. Nothing is dispatched or started under a Skipped
+ancestor, at any depth and of any type.
+
+Nested block
 collection uses a recursive CTE with a depth cap of 100; avoid cyclic graphs.
+Cooldown's walk up to a top-level block stops after 64 levels. Parent completion
+looks at each reachable child block once, so a cycle cannot exhaust memory there.
+These ceilings are safety limits, not supported workflow depths.
 
 ### Dormant recovery steps
 
@@ -395,7 +427,24 @@ workflow into a successful one. Use a valid job class and provide its inputs.
 
 After refreshing the step, the worker ignores terminal/already Running rows,
 transitions to Running, starts timing, attaches the optional owner, and selects
-the database exception handler.
+the database exception handler. A worker refused because an ancestor is Skipped
+moves its step to Skipped. The start claim runs up to three times after a deadlock.
+
+A worker's lifecycle writes (`response`, duration, errors, retries, state) require
+it to still own its step: the row is locked and its state and dispatch generation
+are compared first. A worker whose step was recovered, stopped or cancelled while
+it ran writes nothing, runs no later hook and logs one warning. Its `finally`
+blocks still run. Code in your job that writes to `$this->step` directly is not
+covered by this check.
+
+Two outcomes stand once they are saved:
+
+- A parent the dispatcher completed during its own job stays Completed. The job
+  still stores its result, duration and error text and runs its hooks. If it then
+  fails, the failure stays on record with a warning, and the outcome does not change.
+- When a listener reacting to a saved state fails, the state stays saved, the
+  listener is not run a second time, and the error is stored and reported to the
+  queue. A save that never reached the row ends the step Failed instead.
 
 For a normal run, guards are evaluated in this order. Only the exact return
 value `false` rejects a guard; absent hooks allow the run.
@@ -438,7 +487,7 @@ if it may never succeed. Successful confirmation uses the parent completion gate
 | `retryJob($dispatchAfter = null)` | Pending, counted retry, clears current throttle flag, assigns backoff/due time, may raise priority |
 | `rescheduleWithoutRetry($dispatchAfter = null)` | Pending, no retry increment, sets both throttle flags and a due time; may raise priority |
 | `retryForConfirmation()` | Sets confirmation mode and returns to Pending; no new delay |
-| `stopJob()` / `skipJob()` | Stops or skips and marks status handled |
+| `stopJob()` / `skipJob()` | Stops or skips and marks status handled. A skip is refused on a parent with a step inside it that has started: the parent stays Running |
 | `reportAndFail(Throwable $e)` | Stores parsed diagnostics, finalizes timing, fails the step |
 | `startDuration()` / `finalizeDuration()` | Timing helpers; finalization does nothing if execution never started |
 
@@ -684,9 +733,9 @@ Normal Laravel options such as `--no-interaction` remain available.
 |---|---|
 | `steps:dispatch` | `--group=` |
 | `steps:install` | Requires non-empty `--prefix=` |
-| `steps:recover-stale` | `--recover-dispatched`, `--release-locks`, `--watchdog-progress`, `--step-threshold=300`, `--lock-threshold=30`, `--progress-threshold=600` |
-| `steps:archive` | `--duration=5` days; minimum 1 |
-| `steps:purge` | `--days=30` minimum 1, `--only-archive`, `--ticks` |
+| `steps:recover-stale` | `--recover-dispatched`, `--release-locks`, `--watchdog-progress`, `--step-threshold=300`, `--lock-threshold=30`, `--progress-threshold=600`, `--output` |
+| `steps:archive` | `--duration=5` days; minimum 1, `--output` |
+| `steps:purge` | `--days=30` minimum 1, `--only-archive`, `--ticks`, `--output` |
 
 `steps:dispatch` exits successfully without work when the activity flag is
 absent. Without `--group`, it visits groups present in the current dispatcher's
@@ -731,6 +780,12 @@ The `StaleStepsDetected` event exposes severity, reason, count,
 context. Reasons include `stale_running_steps_recovered`, `stale_dispatched_steps_promoted`,
 `stale_dispatched_steps_still_stuck`, `stale_dispatcher_locks_released`, and
 `group_no_progress`.
+`stale_dispatched_steps_still_stuck` is the critical one. It fires only when
+Dispatched recovery has already rescued every step in the batch; earlier ordinary
+retries do not count. Recovery recognizes a rescue by the note it leaves in
+`error_message`, so a job that overwrites the note makes a repeat report as a
+warning. Any other batch reports a warning, raises priority, and requeues, or fails
+the steps with no retries left.
 Your host listener owns notification delivery and response.
 
 ### Retention
@@ -810,6 +865,8 @@ callback; `getSlowDispatchCallable()` exposes it. The runtime callback takes pre
 over `dispatch.on_slow_dispatch`. A slow callback is called only for a retained
 tick whose duration exceeds `dispatch.warning_threshold_ms` (default 40,000).
 Tick progress and duration describe the dispatcher tick, not worker completion.
+Progress counts the phases a tick passed, so a tick that did its work in the
+first phase and ended there records 0.
 `Timing::elapsedMs($startMicrotime)` supplies the shared rounded, non-negative
 elapsed-millisecond calculation.
 
@@ -869,11 +926,19 @@ composer test:full    # fresh full TIA graph and full suite
 Direct equivalents: `./run-pest-tia.sh --filtered` and
 `./run-pest-tia.sh --fresh`. See [tests/TestCase.php](tests/TestCase.php) for the
 SQLite in-memory setup and [run-pest-tia.sh](run-pest-tia.sh) for graph handling.
-The fresh suite passed **227 tests / 583 assertions on 2026-09-28**. This is a
-specific local result, not a timing SLA or cross-database CI certification.
+Historical record: at runtime baseline v1.20.5, the fresh suite passed **227
+tests / 583 assertions on 2026-09-28**. This is a specific local result from that
+audit, not the current count, a timing SLA or cross-database CI certification.
 
-The documentation reconciliation in [CHANGELOG.md](CHANGELOG.md) changes no
-runtime behavior. Runtime baseline for this audit: v1.20.5.
+`tests/Collision` runs separate PHP processes against one real database, because
+row locks do nothing on SQLite. It uses local MySQL by default;
+`STEP_DISPATCHER_COLLISION_DRIVER=pgsql` runs the same tests on Postgres. The
+tests only touch the database `step_dispatcher_collision_tests`, created when
+missing, and the name cannot be changed. Without a reachable server they skip and
+show the reason. Run one collision suite at a time per server.
+
+The documentation reconciliation in [CHANGELOG.md](CHANGELOG.md) changed no
+runtime behavior.
 
 ## Changes in v1.20.6
 

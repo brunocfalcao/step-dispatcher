@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace StepDispatcher\Models;
 
+use Closure;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -26,6 +28,7 @@ use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Support\RuntimeContext;
 use StepDispatcher\Support\Steps;
+use Throwable;
 
 /**
  * @property int $id
@@ -87,6 +90,107 @@ final class Step extends BaseModel
 
         'state' => StepStatus::class,
     ];
+
+    /**
+     * The row locks this process holds, innermost last. Each one is a
+     * transaction that has begun and not yet been committed.
+     *
+     * @var list<array{id: mixed, connection: Connection}>
+     */
+    private static array $rowLockHolds = [];
+
+    /**
+     * Run a write with this row locked, from the read it decides on to its save.
+     *
+     * The lock only orders competing writers, and it ends the moment the write
+     * saves a new state. A project's reaction to that state then runs with the
+     * result committed, exactly where it runs in a save with no lock, so a
+     * reaction that fails cannot take the result with it. That includes a failed
+     * query on Postgres, which aborts the whole transaction around it.
+     *
+     * A write that throws keeps what it already saved, and the failure is thrown
+     * again once the lock is released. The one exception is a failed statement
+     * before the state save, such as a query in a saving, updating or non-state
+     * updated listener: on Postgres it aborts the lock's transaction, so the
+     * earlier saves are lost and the state does not move.
+     *
+     * For the engine's own writes only. A write must save the state of the row it
+     * locked last, and must not open its own transaction around that save.
+     *
+     * @internal
+     *
+     * @param  Closure(?self): mixed  $write
+     */
+    public static function whileRowLocked(mixed $id, Closure $write): mixed
+    {
+        $connection = (new self)->getConnection();
+        $connection->beginTransaction();
+
+        $depth = count(self::$rowLockHolds);
+        self::$rowLockHolds[] = ['id' => $id, 'connection' => $connection];
+
+        try {
+            $result = $write(self::query()->whereKey($id)->lockForUpdate()->first());
+        } catch (Throwable $e) {
+            try {
+                self::releaseRowLocks($depth);
+            } catch (Throwable) {
+                // The failure already being reported is the one that matters.
+            }
+
+            throw $e;
+        }
+
+        self::releaseRowLocks($depth);
+
+        return $result;
+    }
+
+    /**
+     * Commit every lock taken above this depth, innermost first. The state save
+     * may already have released them, which leaves nothing to do here.
+     */
+    private static function releaseRowLocks(int $depth): void
+    {
+        while (count(self::$rowLockHolds) > $depth) {
+            $hold = array_pop(self::$rowLockHolds);
+
+            try {
+                $hold['connection']->commit();
+            } catch (Throwable $e) {
+                try {
+                    $hold['connection']->rollBack();
+                } catch (Throwable) {
+                    // The failed commit is the one that matters.
+                }
+
+                throw $e;
+            }
+        }
+    }
+
+    /**
+     * End the lock on this row once its new state is saved, before any listener
+     * hears about it. Eloquent has run the UPDATE by the time 'updated' fires.
+     *
+     * @param  string  $event
+     * @param  bool  $halt
+     * @return mixed
+     */
+    protected function fireModelEvent($event, $halt = true)
+    {
+        if ($event === 'updated' && self::$rowLockHolds !== [] && $this->wasChanged('state')) {
+            foreach (self::$rowLockHolds as $depth => $hold) {
+                if ((string) $hold['id'] === (string) $this->getKey()) {
+                    self::releaseRowLocks($depth);
+
+                    break;
+                }
+            }
+        }
+
+        return parent::fireModelEvent($event, $halt);
+    }
 
     /**
      * Static accessor used by raw-SQL sites (recursive CTEs,
@@ -317,6 +421,106 @@ final class Step extends BaseModel
     }
 
     /**
+     * Whether any step above this one is Skipped. Nothing starts under a
+     * Skipped ancestor, at any depth. The walk stops at a block it has already
+     * seen, because nothing in the schema prevents a child_block_uuid loop.
+     *
+     * With $holdRows each ancestor stays share-locked until the transaction
+     * ends. A worker's start claim uses this, so that a parent's skip and the
+     * start of something inside it cannot both succeed: whichever takes the
+     * parent's row second sees what the first one did.
+     */
+    public function hasSkippedAncestor(bool $holdRows = false): bool
+    {
+        $block = $this->block_uuid;
+        $seen = [];
+
+        while ($block !== null && ! isset($seen[$block])) {
+            $seen[$block] = true;
+
+            $parent = self::query()->where('child_block_uuid', $block)->first();
+
+            // Locked by primary key. On MySQL a locking read through the
+            // non-unique child_block_uuid index also locks the gaps around it,
+            // and children of one parent starting at once deadlock on those.
+            if ($parent !== null && $holdRows) {
+                $parent = self::query()->whereKey($parent->getKey())->sharedLock()->first();
+            }
+
+            if ($parent === null) {
+                return false;
+            }
+
+            if ($parent->state instanceof Skipped) {
+                return true;
+            }
+
+            $block = $parent->block_uuid;
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether anything inside this parent, at any depth, has started. Skipped on
+     * a parent means everything inside it was skipped, so a parent for which
+     * this is true cannot become Skipped.
+     *
+     * A step has started once it reaches Dispatched or a later working state. A
+     * retry or a reschedule keeps it counted after it goes back to Pending, and
+     * after it later ends Cancelled or Skipped. started_at cannot answer this:
+     * a retry clears it, and a step that skipped itself on its start check has
+     * one without having done any work.
+     *
+     * These are plain reads. A worker's start locks its own row and then this
+     * parent's, so locking a child here could deadlock with it; the parent's row
+     * lock orders the two instead. That needs the read to see the latest data:
+     * on MySQL, a job calling skipJob() inside its own transaction after an
+     * earlier read gets that older snapshot and can miss a child started since.
+     */
+    public function hasChildThatStarted(): bool
+    {
+        if (! $this->isParent()) {
+            return false;
+        }
+
+        $blocks = [$this->child_block_uuid];
+        $seen = [];
+
+        while ($blocks !== []) {
+            $seen = array_merge($seen, $blocks);
+
+            $inside = self::query()->whereIn('block_uuid', $blocks)->whereKeyNot($this->getKey());
+
+            $started = (clone $inside)
+                ->where(static function (Builder $query): void {
+                    $query->whereIn('state', [
+                        Dispatched::class,
+                        Running::class,
+                        Completed::class,
+                        Failed::class,
+                        Stopped::class,
+                    ])
+                        ->orWhere('retries', '>', 0)
+                        ->orWhere('is_throttled', true)
+                        ->orWhere('was_throttled', true);
+                })
+                ->exists();
+
+            if ($started) {
+                return true;
+            }
+
+            $blocks = array_values(array_diff(
+                $inside->whereNotNull('child_block_uuid')->pluck('child_block_uuid')->unique()->all(),
+                $seen,
+            ));
+        }
+
+        return false;
+    }
+
+    /**
      * A resolve-exception step that is still NotRunnable (never activated).
      * These are inert on success paths and should not block parent completion.
      */
@@ -385,6 +589,24 @@ final class Step extends BaseModel
 
     public function childStepsAreConcludedFromMap($childStepsByBlock, bool $forCompletion = false): bool
     {
+        $visitedBlocks = [];
+
+        return $this->childBlocksAreConcludedFromMap($childStepsByBlock, $forCompletion, $visitedBlocks);
+    }
+
+    /**
+     * @param  array<string, true>  $visitedBlocks
+     */
+    private function childBlocksAreConcludedFromMap($childStepsByBlock, bool $forCompletion, array &$visitedBlocks): bool
+    {
+        // A block reached again adds no new steps. Stopping here also keeps
+        // bad data with a cycle from exhausting memory and killing the tick.
+        if (isset($visitedBlocks[$this->child_block_uuid])) {
+            return true;
+        }
+
+        $visitedBlocks[$this->child_block_uuid] = true;
+
         $children = $childStepsByBlock[$this->child_block_uuid]
         ?? (method_exists($childStepsByBlock, 'get') ? $childStepsByBlock->get($this->child_block_uuid) : null);
 
@@ -414,7 +636,7 @@ final class Step extends BaseModel
             }
 
             if ($child->isParent()) {
-                $recurse = $child->childStepsAreConcludedFromMap($childStepsByBlock, $forCompletion);
+                $recurse = $child->childBlocksAreConcludedFromMap($childStepsByBlock, $forCompletion, $visitedBlocks);
                 if (! $recurse) {
                     return false;
                 }
@@ -426,6 +648,23 @@ final class Step extends BaseModel
 
     public function childStepsAreConcluded(bool $forCompletion = false): bool
     {
+        $visitedBlocks = [];
+
+        return $this->childBlocksAreConcluded($forCompletion, $visitedBlocks);
+    }
+
+    /**
+     * @param  array<string, true>  $visitedBlocks
+     */
+    private function childBlocksAreConcluded(bool $forCompletion, array &$visitedBlocks): bool
+    {
+        // See childBlocksAreConcludedFromMap(): each block is looked at once.
+        if (isset($visitedBlocks[$this->child_block_uuid])) {
+            return true;
+        }
+
+        $visitedBlocks[$this->child_block_uuid] = true;
+
         $children = $this->childSteps()->get();
 
         if ($children->isEmpty()) {
@@ -445,7 +684,7 @@ final class Step extends BaseModel
                 return false;
             }
 
-            if ($child->isParent() && ! $child->childStepsAreConcluded($forCompletion)) {
+            if ($child->isParent() && ! $child->childBlocksAreConcluded($forCompletion, $visitedBlocks)) {
                 return false;
             }
         }

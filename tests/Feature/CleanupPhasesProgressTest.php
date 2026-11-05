@@ -10,6 +10,7 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
 use StepDispatcher\States\NotRunnable;
+use StepDispatcher\States\Pending;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
@@ -114,36 +115,58 @@ it('skipAllChildStepsOnParentAndChildSingleStep returns false when every descend
 });
 
 /**
- * promoteResolveExceptionSteps has the same `return true` shape on a path
- * that did no work. Direct simulation of the race is awkward (it requires
- * a state mutation between two SELECT queries inside the static method),
- * so instead this test pins the contract via source-level inspection: the
- * method body must not unconditionally `return true` after the
- * `batchTransitionSteps` call — the return must be gated on whether work
- * was actually done. Defensive against a regression that re-introduces
- * the bug from a different angle.
+ * promoteResolveExceptionSteps has the same contract: only a transition that
+ * really happened counts as work. A resolver that cannot be promoted must not
+ * end the tick, and must not hide the failing blocks behind it either.
  */
-it('promoteResolveExceptionSteps source guards against returning true on empty work', function () {
-    $reflection = new ReflectionMethod(StepDispatcher::class, 'promoteResolveExceptionSteps');
-    $body = file(StepDispatcher::class
-        ? (new ReflectionClass(StepDispatcher::class))->getFileName()
-        : '');
+function seedFailingBlockWithResolver(): Step
+{
+    $block = (string) Str::uuid();
 
-    $start = $reflection->getStartLine();
-    $end = $reflection->getEndLine();
-    $source = implode('', array_slice($body, $start - 1, $end - $start + 1));
+    forceCleanupState(seedCleanupStep(['block_uuid' => $block]), Failed::class);
 
-    // After the fix, the return decision should reference $stepIds (or an
-    // explicit work-done flag) — never a bare `return true;` floating
-    // outside an `if ($stepIds)` guard. The exact string we forbid is the
-    // closing pattern of the buggy version: `}\n        return true;\n    }`
-    // immediately following the `batchTransitionSteps` block.
-    expect($source)->not->toMatch(
-        '/batchTransitionSteps\([^)]*\);\s*}\s*return\s+true;\s*}/s',
-        'promoteResolveExceptionSteps must not unconditionally return true after batchTransitionSteps — '
-        .'when stepIds is empty (race with a parallel tick that already promoted the resolve-exception), '
-        .'returning true blocks the dispatcher just like the skipAll bug.'
-    );
+    $resolver = seedCleanupStep(['block_uuid' => $block, 'type' => 'resolve-exception', 'index' => null]);
+    forceCleanupState($resolver, NotRunnable::class);
+
+    return $resolver->fresh();
+}
+
+function refuseWritesTo(Step $resolver): void
+{
+    Step::updating(static function (Step $step) use ($resolver): void {
+        if ($step->id === $resolver->id) {
+            throw new RuntimeException('write refused');
+        }
+    });
+}
+
+it('promoteResolveExceptionSteps claims no work when no resolver could be promoted', function () {
+    $resolver = seedFailingBlockWithResolver();
+    refuseWritesTo($resolver);
+
+    expect(StepDispatcher::promoteResolveExceptionSteps('cleanup-test'))->toBeFalse()
+        ->and($resolver->fresh()->state)->toBeInstanceOf(NotRunnable::class);
+});
+
+it('promoteResolveExceptionSteps moves past a block it could not promote', function () {
+    $stuck = seedFailingBlockWithResolver();
+    $next = seedFailingBlockWithResolver();
+    refuseWritesTo($stuck);
+
+    expect(StepDispatcher::promoteResolveExceptionSteps('cleanup-test'))->toBeTrue()
+        ->and($stuck->fresh()->state)->toBeInstanceOf(NotRunnable::class)
+        ->and($next->fresh()->state)->toBeInstanceOf(Pending::class);
+});
+
+it('a tick still dispatches work past a resolver it could not promote', function () {
+    Queue::fake();
+
+    refuseWritesTo(seedFailingBlockWithResolver());
+    $runnable = seedCleanupStep(['class' => PrefixCarryingTestJob::class, 'index' => 1]);
+
+    StepDispatcher::dispatch('cleanup-test');
+
+    expect($runnable->fresh()->state)->toBeInstanceOf(Dispatched::class);
 });
 
 /**
@@ -200,6 +223,50 @@ it('batchTransitionSteps returns the count of transitions that actually happened
     expect($count)->toBe(1)
         ->and($movable->fresh()->state)->toBeInstanceOf(Skipped::class)
         ->and($immovable->fresh()->state)->toBeInstanceOf(Completed::class);
+});
+
+it('batchTransitionSteps counts a step that no longer exists as no work', function () {
+    $movable = seedCleanupStep([]);
+    forceCleanupState($movable, Dispatched::class);
+
+    $count = StepDispatcher::batchTransitionSteps([$movable->id + 1000, $movable->id], Skipped::class);
+
+    expect($count)->toBe(1)
+        ->and($movable->fresh()->state)->toBeInstanceOf(Skipped::class);
+});
+
+it('batchTransitionSteps keeps a step moved when a reaction fails, counts only the clean move, and carries on', function () {
+    $reacting = seedCleanupStep([]);
+    forceCleanupState($reacting, Dispatched::class);
+
+    $movable = seedCleanupStep([]);
+    forceCleanupState($movable, Dispatched::class);
+
+    Step::updated(static function (Step $step) use ($reacting): void {
+        if ($step->id === $reacting->id) {
+            throw new RuntimeException('listener failed');
+        }
+    });
+
+    $count = StepDispatcher::batchTransitionSteps([$reacting->id, $movable->id], Cancelled::class);
+
+    expect($count)->toBe(1)
+        ->and($reacting->fresh()->state)->toBeInstanceOf(Cancelled::class)
+        ->and($movable->fresh()->state)->toBeInstanceOf(Cancelled::class);
+});
+
+it('batchTransitionSteps leaves a step as it was when its save never happened', function () {
+    $refused = seedCleanupStep([]);
+    forceCleanupState($refused, Dispatched::class);
+
+    Step::updating(static function (Step $step) use ($refused): void {
+        if ($step->id === $refused->id) {
+            throw new RuntimeException('save refused');
+        }
+    });
+
+    expect(StepDispatcher::batchTransitionSteps([$refused->id], Cancelled::class))->toBe(0)
+        ->and($refused->fresh()->state)->toBeInstanceOf(Dispatched::class);
 });
 
 it('does not starve dispatchable priority work while cleanup advances another workflow', function () {

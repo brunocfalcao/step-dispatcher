@@ -73,7 +73,6 @@ return new class extends Migration
         return array_values(array_filter(
             $names,
             static fn (string $name): bool => (bool) preg_match('/^(?:\w+_)?steps(?:_archive)?$/', $name)
-                && ! str_contains($name, 'dispatcher')
                 && Schema::hasTable($name)
                 && Schema::hasColumn($name, 'block_uuid')
                 && Schema::hasColumn($name, 'state'),

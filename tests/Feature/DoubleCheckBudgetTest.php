@@ -92,3 +92,12 @@ it('fails the step once the double-check budget is exhausted', function (): void
         ->and($fresh->error_message)->toContain('verification budget exhausted')
         ->and(DoubleCheckTestJob::$computeRuns)->toBe(0);
 });
+
+it('records how long the attempt ran when an exhausted budget fails the step', function (): void {
+    DoubleCheckTestJob::$startDelayMicroseconds = 3000;
+
+    $fresh = runDoubleCheck(doubleCheckStep(2));
+
+    expect($fresh->state)->toBeInstanceOf(Failed::class)
+        ->and((int) $fresh->duration)->toBeGreaterThan(0);
+});

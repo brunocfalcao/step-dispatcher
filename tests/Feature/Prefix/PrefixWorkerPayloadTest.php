@@ -89,15 +89,9 @@ it('successful worker execution reads and writes only the prefixed step', functi
 });
 
 it('handle() pushes stepPrefix and the finally pop balances the stack', function () {
-    // The package suite runs against sqlite :memory:, and
-    // BaseDatabaseExceptionHandler::make() rejects sqlite — so
-    // running handle() end-to-end inside the worker chain is not
-    // viable here (host apps test that path against real MySQL
-    // via the steps-dispatcher harness). What this test pins is
-    // the structural contract that matters: handle() opens with a
-    // push and closes with a matching pop in finally. If that pair
-    // is wrong, every other prefix guarantee in the worker chain
-    // unravels.
+    // handle() opens with a push and closes with a matching pop in finally.
+    // If that pair is wrong, every other prefix guarantee in the worker chain
+    // unravels. The test below covers the same pair when handle() throws.
     app(RuntimeContext::class)->reset();
 
     $step = Step::create([
@@ -119,24 +113,39 @@ it('handle() pushes stepPrefix and the finally pop balances the stack', function
         .'so the depth-balance assertion below is meaningful.'
     );
 
-    // handle() will throw inside (sqlite + the package's MySQL/
-    // pgsql-only DatabaseExceptionHandler), but the finally-block
-    // pop must still execute — that is the whole reason the push/
-    // pop pair lives inside try/finally rather than scattered
-    // around individual call paths.
-    try {
-        $job->handle();
-    } catch (Throwable) {
-        // expected on sqlite; we are not asserting compute() ran.
-    }
+    $job->handle();
 
     expect(app(RuntimeContext::class)->depth())->toBe(0,
-        'Even when inner code throws, handle() MUST leave the '
+        'handle() MUST leave the '
         .'RuntimeContext stack at exactly the depth it was entered '
         .'at. A non-zero depth here means a queued job in the same '
         .'worker process would inherit the wrong ambient prefix on '
         .'its next pickup — silent cross-job state pollution.'
     );
+});
+
+it('handle() balances the stack when a failure escapes it', function () {
+    app(RuntimeContext::class)->reset();
+
+    $step = Steps::usingPrefix('trading', fn (): Step => Step::create([
+        'class' => \StepDispatcher\Tests\Fixtures\PrefixThrowingTestJob::class,
+        'type' => 'default',
+        'queue' => 'default',
+        'group' => 'handle-balance',
+        'index' => null,
+        'block_uuid' => (string) Str::uuid(),
+        'state' => Pending::class,
+    ]));
+
+    $job = new \StepDispatcher\Tests\Fixtures\PrefixThrowingTestJob;
+    $job->step = $step;
+    $job->stepPrefix = 'trading_';
+
+    expect(fn () => $job->handle())->toThrow(RuntimeException::class, 'resolver failed')
+        ->and(app(RuntimeContext::class)->depth())->toBe(0,
+            'A failure escaping handle() must still pop the prefix, or the next '
+            .'job in this worker process inherits the wrong ambient prefix.'
+        );
 });
 
 it('failed() pushes stepPrefix and writes the Failed transition to the prefixed table', function () {

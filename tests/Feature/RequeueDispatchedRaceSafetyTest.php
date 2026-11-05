@@ -14,6 +14,7 @@ use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\Tests\Fixtures\ConstructorArgTestJob;
+use StepDispatcher\Tests\Fixtures\ObsoleteAttemptTestJob;
 
 beforeEach(function () {
     config()->set('step-dispatcher.flag_path', sys_get_temp_dir());
@@ -160,6 +161,7 @@ it('fails dispatched work after its declared recovery budget is exhausted', func
         'index' => 1,
         'block_uuid' => (string) Str::uuid(),
         'retries' => 1,
+        'error_message' => 'Recovered by stale detector: Dispatched payload stalled, retrying (0/1)',
     ]);
 
     Step::withoutEvents(function () use ($step): void {
@@ -182,6 +184,129 @@ it('fails dispatched work after its declared recovery budget is exhausted', func
         StaleStepsDetected::class,
         fn (StaleStepsDetected $event): bool => $event->severity === 'critical'
             && $event->reason === 'stale_dispatched_steps_still_stuck',
+    );
+});
+
+function stuckDispatchedStep(string $class, int $retries, ?string $errorMessage): Step
+{
+    $step = Step::create([
+        'class' => $class,
+        'type' => 'default',
+        'queue' => 'positions',
+        'priority' => 'default',
+        'group' => 'test-group',
+        'index' => 1,
+        'block_uuid' => (string) Str::uuid(),
+        'retries' => $retries,
+        'error_message' => $errorMessage,
+    ]);
+
+    Step::withoutEvents(function () use ($step): void {
+        DB::table('steps')->where('id', $step->id)->update([
+            'state' => Dispatched::class,
+            'updated_at' => now()->subMinutes(10),
+        ]);
+    });
+
+    return $step;
+}
+
+function recoverStuckDispatchedSteps(): void
+{
+    Artisan::call('steps:recover-stale', [
+        '--recover-dispatched' => true,
+        '--step-threshold' => 0,
+    ]);
+}
+
+it('treats a first stuck step as a warning however it was retried before', function (?string $errorMessage) {
+    Event::fake([StaleStepsDetected::class]);
+
+    $step = stuckDispatchedStep(ObsoleteAttemptTestJob::class, 2, $errorMessage);
+
+    recoverStuckDispatchedSteps();
+
+    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
+        ->and($step->fresh()->retries)->toBe(3)
+        ->and($step->fresh()->priority)->toBe('high')
+        ->and($step->fresh()->error_message)->toBe('Recovered by stale detector: Dispatched payload stalled, retrying (2/5)');
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'warning'
+            && $event->reason === 'stale_dispatched_steps_promoted'
+            && $event->alreadyPromotedCount === 0
+            && $event->promotedCount === 1,
+    );
+    Event::assertNotDispatched(StaleStepsDetected::class, fn (StaleStepsDetected $event): bool => $event->severity === 'critical');
+})->with([
+    'an ordinary retry with no message' => [null],
+    'a message the job wrote itself' => ['The bank rejected this file'],
+    'a rescue from running too long' => ['Recovered by stale detector: Running for 900s (threshold: 300s), retrying (1/5)'],
+]);
+
+it('sends the critical alert when a step recovery already rescued gets stuck again', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    $step = stuckDispatchedStep(ObsoleteAttemptTestJob::class, 0, null);
+
+    recoverStuckDispatchedSteps();
+
+    Event::assertDispatchedTimes(StaleStepsDetected::class, 1);
+    Event::assertDispatched(StaleStepsDetected::class, fn (StaleStepsDetected $event): bool => $event->severity === 'warning');
+
+    Step::find($step->id)->state->transitionTo(Dispatched::class);
+    Step::withoutEvents(function () use ($step): void {
+        DB::table('steps')->where('id', $step->id)->update(['updated_at' => now()->subMinutes(10)]);
+    });
+
+    recoverStuckDispatchedSteps();
+
+    expect($step->fresh()->state)->toBeInstanceOf(Pending::class)
+        ->and($step->fresh()->retries)->toBe(2);
+
+    Event::assertDispatchedTimes(StaleStepsDetected::class, 2);
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'critical'
+            && $event->reason === 'stale_dispatched_steps_still_stuck'
+            && $event->alreadyPromotedCount === 1,
+    );
+});
+
+it('keeps the warning and raises priority while any stuck step in the group is a first timer', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    $rescued = stuckDispatchedStep(ObsoleteAttemptTestJob::class, 1, 'Recovered by stale detector: Dispatched payload stalled, retrying (0/5)');
+    $firstTimer = stuckDispatchedStep(ObsoleteAttemptTestJob::class, 1, null);
+
+    recoverStuckDispatchedSteps();
+
+    expect($rescued->fresh()->priority)->toBe('high')
+        ->and($firstTimer->fresh()->priority)->toBe('high');
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'warning'
+            && $event->count === 2
+            && $event->alreadyPromotedCount === 1,
+    );
+});
+
+it('fails a first stuck step with no retries left and reports a warning', function () {
+    Event::fake([StaleStepsDetected::class]);
+
+    $step = stuckDispatchedStep(ConstructorArgTestJob::class, 1, null);
+
+    recoverStuckDispatchedSteps();
+
+    expect($step->fresh()->state)->toBeInstanceOf(Failed::class)
+        ->and($step->fresh()->error_message)->toContain('retries exhausted');
+
+    Event::assertDispatched(
+        StaleStepsDetected::class,
+        fn (StaleStepsDetected $event): bool => $event->severity === 'warning'
+            && $event->context['failed_count'] === 1,
     );
 });
 

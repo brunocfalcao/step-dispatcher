@@ -24,9 +24,11 @@ final class RunningToPending extends Transition
 
     public function handle(): Step
     {
-        // Conditionally increment retry count based on is_throttled flag
+        // Conditionally increment retry count based on is_throttled flag. It is
+        // written by the same save as the state: a save that gets refused then
+        // leaves no raised count behind for the job to read as another attempt.
         if (! $this->step->is_throttled) {
-            $this->step->increment('retries');
+            $this->step->retries = (int) $this->step->retries + 1;
         }
 
         // Reset timers

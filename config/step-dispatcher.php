@@ -50,8 +50,8 @@ return [
     | All applications sharing the same database MUST point to the same path
     | (typically the dispatcher app's storage directory).
     |
-    | This value is REQUIRED. The dispatcher will throw a RuntimeException
-    | if not configured.
+    | Defaults to the storage directory below. The dispatcher throws a
+    | RuntimeException if this value is empty.
     |
     */
     'flag_path' => storage_path('step-dispatcher'),
@@ -80,8 +80,9 @@ return [
     | events land at {path}/dispatcher.log.
     |
     | Designed as a flip-on-debug-flip-off tool: writes are bypassed entirely
-    | when disabled, and step folders are removed when the step row is
-    | deleted (archive or purge), so the system doesn't accumulate log dirs.
+    | when disabled. A step folder is removed when the step model is deleted.
+    | steps:archive and steps:purge delete rows in bulk and do not remove
+    | folders, so the host manages the retention of these files.
     |
     */
     'logging' => [

@@ -29,9 +29,11 @@ use StepDispatcher\Models\Step;
  *   - 'stale_dispatched_steps_promoted'     — stuck Dispatched step(s) requeued
  *                                              at high priority on their
  *                                              original queues.
- *   - 'stale_dispatched_steps_still_stuck'  — recovery already happened and
- *                                              the step(s) are Dispatched
- *                                              again.
+ *   - 'stale_dispatched_steps_still_stuck'  — Dispatched recovery already
+ *                                              rescued every step in the
+ *                                              batch, and each is Dispatched
+ *                                              again. Earlier ordinary retries
+ *                                              do not count.
  *   - 'stale_dispatcher_locks_released'     — one or more group locks were
  *                                              force-unlocked.
  */

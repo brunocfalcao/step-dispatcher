@@ -10,6 +10,7 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\Support\StepDispatcher;
 
 final class PendingToDispatched extends Transition
 {
@@ -26,6 +27,11 @@ final class PendingToDispatched extends Transition
     public function canTransition(): bool
     {
         if (! $this->step->state instanceof Pending) {
+            return false;
+        }
+
+        // Nothing starts under a Skipped ancestor, at any depth and of any type.
+        if ($this->hasSkippedAncestor()) {
             return false;
         }
 
@@ -134,7 +140,7 @@ final class PendingToDispatched extends Transition
     {
         $attributes = ['state' => Dispatched::class];
 
-        // If we have a tick id, let's update the step with it.
+        // Stamp the step with the tick that dispatches it.
         // Cache key includes prefix + group suffix to match
         // StepsDispatcher::startDispatch(). Without the prefix
         // component two dispatchers (different prefix, same group)
@@ -142,9 +148,9 @@ final class PendingToDispatched extends Transition
         $cacheSuffix = \StepDispatcher\Models\StepsDispatcher::cacheKeyPrefix().($this->step->group ?? 'global');
         $cacheKey = "current_tick_id:{$cacheSuffix}";
 
-        if (cache()->has($cacheKey)) {
-            $attributes['tick_id'] = cache($cacheKey);
-        }
+        // With no current tick the column is cleared, so this dispatch cannot
+        // pass for the earlier one that stamped it.
+        $attributes['tick_id'] = cache($cacheKey);
 
         $claimed = Step::query()
             ->whereKey($this->step->id)
@@ -174,6 +180,18 @@ final class PendingToDispatched extends Transition
         ));
 
         return $this->step;
+    }
+
+    /**
+     * Check for a Skipped ancestor from cache or database.
+     */
+    private function hasSkippedAncestor(): bool
+    {
+        if ($this->stepsCache !== null) {
+            return StepDispatcher::hasSkippedAncestorInCache($this->step->block_uuid, $this->stepsCache['parents_by_child_block']);
+        }
+
+        return $this->step->hasSkippedAncestor();
     }
 
     /**

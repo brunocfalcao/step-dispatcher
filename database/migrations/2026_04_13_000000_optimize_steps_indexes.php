@@ -10,9 +10,8 @@ return new class extends Migration
 {
     /**
      * Optimizes indexes on the steps table.
-     * Drops 18 redundant single-column and overlapping composite indexes,
+     * Drops 22 redundant single-column and overlapping composite indexes,
      * adds 2 new composites for uncovered query patterns.
-     * Result: 27 indexes → 11 (plus PK).
      */
     public function up(): void
     {

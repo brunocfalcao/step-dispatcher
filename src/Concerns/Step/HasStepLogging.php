@@ -27,9 +27,10 @@ use Illuminate\Support\Facades\File;
  * immediately before touching the filesystem.
  *
  * Intended use: flip on temporarily to diagnose a specific backlog or wedge,
- * collect a few minutes of data, flip off. Folders are deleted when the
- * underlying step row is deleted (StepObserver::deleted), so archived or
- * purged steps don't leak log directories.
+ * collect a few minutes of data, flip off. A folder is deleted when the step
+ * model is deleted (StepObserver::deleted). steps:archive and steps:purge
+ * delete rows in bulk, which bypasses that observer, so their folders remain
+ * and the host manages file retention.
  */
 trait HasStepLogging
 {

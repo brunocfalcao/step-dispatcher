@@ -38,9 +38,52 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
   lane retains its Step's state and retries. Inspection never restores jobs or
   models, matches the runtime table prefix, and defers recovery when Redis or
   a Step payload cannot be inspected. Other drivers retain their existing path.
+
+- The critical stuck alert means Dispatched recovery already rescued every step
+  in the batch, judged by the note each rescue leaves in `error_message`. Retries
+  are no proof, because ordinary retries count them too. A job that overwrites the
+  note makes a repeat report as a warning. A first stuck step with no retries left
+  fails and reports a warning.
 - Parent completion rechecks failed/stopped descendants even after the
   failure-propagation pass, including completion from the job lifecycle. A
   concurrent child failure must propagate before downstream work can advance.
+- A worker's post-run writes require it to still own the row. Every write in
+  the job lifecycle (`response`, duration, errors, retries, state) locks the
+  row first and compares its state and attempt generation, the same check
+  `failed()` makes. A worker whose step was recovered, stopped or cancelled
+  while it ran writes nothing, runs no later consumer hook and logs one warning,
+  while consumer `finally` blocks still run. A parent completed by the dispatcher
+  sweep during its own attempt still stores its result. An attempt that moved the
+  row itself, for example with `retryJob()`, finishes its run only while the row
+  still shows that move. Two identical reschedules with equal retries remain
+  indistinguishable. The check also runs before `executeJobLogic()`, `compute()`
+  and the start hooks, so a step lost during a start check never begins its work.
+  No such stop follows `executeJobLogic()`, because consumers release locks in
+  `finalizeJobExecution()`; each step of that path is guarded instead. Consumer code
+  that writes to `$this->step` directly is not covered by this check. A row lock
+  is not exercised on SQLite, so `tests/Feature` proves the checks and
+  `tests/Collision` proves the lock on real MySQL and Postgres.
+- `Step::whileRowLocked` is the engine's rule for writes that decide on a state:
+  it orders competing writers, adds no rollback, and ends when the new state is
+  saved, through the model's `updated` event. A project's reaction then runs with
+  the result committed. A failed statement before the state save aborts the lock's
+  transaction on Postgres, so earlier saves are lost and the state does not move.
+- After a failed guarded write the job's copy of the step goes back to the row, so
+  a refused state is never written later and a reaction never fires twice. A saved
+  outcome stands; a save that never reached the row ends the step Failed. A project
+  transaction that undoes a saved state returns the step to the attempt.
+- Skipped on a parent means everything inside it was skipped. `hasChildThatStarted`
+  refuses the skip when any step inside, at any depth, reached Dispatched or a later
+  working state, or was retried or rescheduled, and the parent stays Running.
+  `started_at` cannot answer this, because a retry clears it.
+  Nothing is dispatched or started under a Skipped ancestor. A child can be
+  Dispatched for a moment under a parent that has just become Skipped; its worker
+  is refused and moves it to Skipped.
+- A dispatch with no current tick is its own generation: it clears `tick_id`, and
+  only a payload with no tick may run against it. Two consecutive dispatches with
+  no tick and equal retries remain indistinguishable. That needs a tick longer
+  than the 5-minute cache entry or a cache flush, then a worker death and
+  redelivery.
 
 - Cooldown (`src/Support/Cooldown.php`) holds unstarted top-level blocks and
   never pauses bookkeeping. A started top-level block is atomic, descendants
@@ -55,6 +98,8 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
 ## Verification
 
 Available entrypoints: `composer test`, `composer test:full`. Choose the narrowest relevant check; a listed full-suite, build, install, or packaging command is not an instruction to run it for every edit. Inspect test environment and side effects first.
+
+`tests/Collision` contends separate PHP processes on the fixed database `step_dispatcher_collision_tests`: local MySQL by default, Postgres with `STEP_DISPATCHER_COLLISION_DRIVER=pgsql`. It skips with the reason when no server is reachable. Run one at a time per server, and on both servers after changing a lock or a state save. Mutation checks belong in a scratch copy, because local apps symlink to this folder.
 
 Orientation examples read: `src/StepDispatcherServiceProvider.php`, `tests/Feature/ActionableCascadeQueryBudgetTest.php`. Re-read the closest example for the actual task rather than copying an unrelated one.
 

@@ -64,6 +64,12 @@ final class RecoverStaleStepsCommand extends BaseCommand
     private const DEFAULT_TIMEOUT = 300;
 
     /**
+     * Left on a step each time Dispatched recovery rescues it. This is the
+     * only proof of an earlier rescue: retries also count ordinary retries.
+     */
+    private const DISPATCHED_RECOVERY_NOTE = 'Recovered by stale detector: Dispatched payload stalled';
+
+    /**
      * Fallback recovery budget when the job class cannot be resolved or
      * declares a non-positive `$retries`.
      */
@@ -337,13 +343,13 @@ final class RecoverStaleStepsCommand extends BaseCommand
             return;
         }
 
-        // Dispatched -> Pending increments retries. That gives recovery a
-        // durable marker without rewriting the worker lane. Priority alone
-        // cannot identify an earlier recovery because many jobs are born
-        // high-priority.
+        // The note an earlier rescue left is the durable marker. Retries
+        // cannot identify a rescue because ordinary retries count them too,
+        // and priority cannot because many jobs are born high-priority. A job
+        // that later overwrites the note makes a repeat read as a first rescue.
         $alreadyRecovered = Step::query()
             ->whereIn('id', $staleIds)
-            ->where('retries', '>', 0)
+            ->where('error_message', 'like', self::DISPATCHED_RECOVERY_NOTE.'%')
             ->count();
 
         $oldestStep = Step::query()
@@ -351,8 +357,8 @@ final class RecoverStaleStepsCommand extends BaseCommand
             ->orderBy('updated_at', 'asc')
             ->first();
 
-        // CRITICAL path: every stuck step has already consumed at least one
-        // retry and is Dispatched again. Alert the operator AND flip state back
+        // CRITICAL path: recovery has already rescued every stuck step once
+        // and each is Dispatched again. Alert the operator AND flip state back
         // to Pending so the next dispatcher tick re-pushes each step to its
         // original queue.
         if ($alreadyRecovered === $count) {
@@ -552,7 +558,7 @@ final class RecoverStaleStepsCommand extends BaseCommand
             // step retained an earlier throttle marker. Clear it so the
             // DispatchedToPending transition advances the recovery budget.
             $step->update([
-                'error_message' => "Recovered by stale detector: Dispatched payload stalled, retrying ({$step->retries}/{$maxRetries})",
+                'error_message' => self::DISPATCHED_RECOVERY_NOTE.", retrying ({$step->retries}/{$maxRetries})",
                 'is_throttled' => false,
             ]);
             $step->state->transitionTo(Pending::class);

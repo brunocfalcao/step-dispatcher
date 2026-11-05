@@ -19,7 +19,8 @@ final class RunningToSkipped extends Transition
 
     public function canTransition(): bool
     {
-        return true; // Always returns true based on your current logic
+        // Skipped on a parent means everything inside it was skipped.
+        return ! $this->step->hasChildThatStarted();
     }
 
     public function handle(): Step
