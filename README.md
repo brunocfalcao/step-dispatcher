@@ -1,6 +1,6 @@
 # step-dispatcher
 
-## Changes in v1.21.8
+## Changes in v2.0.0
 
 A worker that lost its step while running (recovered, stopped or cancelled
 elsewhere) no longer overwrites it. It writes nothing, runs no later hook and
@@ -14,6 +14,32 @@ dispatched or started under a Skipped ancestor. See
 [Job lifecycle](#job-lifecycle). The new `tests/Collision` suite proves these
 races on real MySQL and Postgres. See
 [Development and verification](#development-and-verification).
+
+### Upgrade notes
+
+Each project moves to 2.0 on its own, by changing its requirement to `^2.0`.
+The requirements are unchanged from 1.21.7: PHP `^8.2`, Illuminate
+`^11.0|^12.0|^13.0`, `spatie/laravel-model-states` `^2.0`. No migration file is
+added; the latest is still the 1.21.0 cooldown migration. The
+[changelog](CHANGELOG.md) lists every change. What a project can observe:
+
+- A worker that no longer owns its row writes nothing, runs no later hook and
+  logs one warning. Code that writes to `$this->step` directly is not covered.
+- A job with `doubleCheck()` that loses its step does not reach
+  `finalizeJobExecution()`, as with a failing double check. Such a job must also
+  release its locks when `needsVerification()` returns true.
+- A parent with a started step inside it, at any depth, refuses Skipped and
+  stays Running. A direct transition to Skipped on it throws.
+- A parent stays Completed when its own job fails after the dispatcher
+  completed it. The error is stored and a warning is logged.
+- A project listener reacting to a saved state runs after the result is
+  committed. If it fails, the state stays and the listener does not run again.
+- Nothing is dispatched or started under a Skipped ancestor.
+- For a prefixed scope, the cache keys `current_tick_id:` and
+  `steps_dispatcher_tick_start:` gain a `|` separator (`trading_|alpha`). The
+  default scope and the `dispatcher:saturation:` keys are unchanged.
+- The critical `stale_dispatched_steps_still_stuck` alert no longer counts
+  earlier ordinary retries as proof of an earlier rescue.
 
 ## Changes in v1.21.7
 
@@ -935,7 +961,13 @@ row locks do nothing on SQLite. It uses local MySQL by default;
 `STEP_DISPATCHER_COLLISION_DRIVER=pgsql` runs the same tests on Postgres. The
 tests only touch the database `step_dispatcher_collision_tests`, created when
 missing, and the name cannot be changed. Without a reachable server they skip and
-show the reason. Run one collision suite at a time per server.
+show the reason. Run one collision suite at a time per server, and on both
+servers after changing a lock or a state save. Do any mutation check in a scratch
+copy of the package, because local applications symlink to this folder.
+`tests/Feature/Scenarios` pins the workflow rules on SQLite across dispatch,
+retries, parents, sweeps and recovery. The canonical
+[testing document](../../../docs/step-dispatcher/02-features/testing.md) lists the
+connection settings and run commands.
 
 The documentation reconciliation in [CHANGELOG.md](CHANGELOG.md) changed no
 runtime behavior.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace StepDispatcher\Tests\Collision;
 
 use FilesystemIterator;
+use Illuminate\Database\Connection;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -18,8 +19,9 @@ use StepDispatcher\StepDispatcherServiceProvider;
 
 /**
  * Base for tests where separate PHP processes contend on one real database
- * server, MySQL unless CollisionEnvironment says otherwise. Unlike the Feature suite it uses no wrapping transaction and no
- * frozen clock, because other processes must see committed rows.
+ * server, MySQL unless CollisionEnvironment says otherwise. Unlike the Feature
+ * suite it uses no wrapping transaction and no frozen clock, because other
+ * processes must see committed rows.
  *
  * Every test rebuilds the schema from the package migrations on the fixed
  * collision database. If the server cannot be reached the test is skipped with the
@@ -162,7 +164,7 @@ abstract class CollisionTestCase extends BaseTestCase
      *
      * @template TResult
      *
-     * @param  callable(\Illuminate\Database\Connection): void  $hold
+     * @param  callable(Connection): void  $hold
      * @param  callable(): void  $whileHeld
      * @param  callable(): TResult  $afterCommit
      * @return TResult

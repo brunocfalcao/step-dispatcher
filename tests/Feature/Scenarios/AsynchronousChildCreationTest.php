@@ -3,9 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 it('creates M1 -> M2 (parent) -> M3 steps with a child block uuid that is not created yet', function (): void {
     $mainBlock = (string) Str::uuid();

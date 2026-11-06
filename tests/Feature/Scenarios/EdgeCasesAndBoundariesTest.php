@@ -6,9 +6,9 @@ use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\Models\StepsDispatcherTicks;
-use StepDispatcher\Tests\Support\StepTester;
+use StepDispatcher\States\Completed;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Test: Empty dispatch (no pending steps)
 // Dispatcher should handle gracefully when there are no steps to dispatch
@@ -38,7 +38,7 @@ it('does not re-dispatch completed steps', function (): void {
     expect($step->state->value())->toBe('completed');
 
     // Mark it as completed (in case it's not)
-    $step->update(['state' => StepDispatcher\States\Completed::class]);
+    $step->update(['state' => Completed::class]);
 
     // Dispatch again
     StepDispatcher\Support\StepDispatcher::dispatch($step->group);
@@ -363,7 +363,6 @@ it('handles deep nesting (5 levels)', function (): void {
         ->withLabel('deep_nesting_5_levels')
         ->test();
 });
-
 
 // Test: Step with null block_uuid
 // Should fail or be rejected

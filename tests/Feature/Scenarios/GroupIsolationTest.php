@@ -10,8 +10,10 @@ use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Failed;
+use StepDispatcher\States\NotRunnable;
 use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
+use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
 
@@ -178,7 +180,7 @@ test('skipped parent in one group does not skip children in other groups', funct
         'class' => ScenarioTestJob::class,
         'block_uuid' => $group1,
         'child_block_uuid' => $childBlock1,
-        'state' => \StepDispatcher\States\Skipped::class,
+        'state' => Skipped::class,
         'group' => $group1,
     ]);
 
@@ -209,7 +211,7 @@ test('skipped parent in one group does not skip children in other groups', funct
     StepDispatcher::dispatch($group1);
 
     // Group 1: Child skipped
-    expect($child1->fresh()->state)->toBeInstanceOf(\StepDispatcher\States\Skipped::class);
+    expect($child1->fresh()->state)->toBeInstanceOf(Skipped::class);
 
     // Group 2: Child unchanged
     expect($child2->fresh()->state)->toBeInstanceOf(Pending::class);
@@ -272,7 +274,7 @@ test('resolve-exception promotion is isolated per group', function (): void {
         'class' => ScenarioTestJob::class,
         'block_uuid' => $group1,
         'type' => 'resolve-exception',
-        'state' => \StepDispatcher\States\NotRunnable::class,
+        'state' => NotRunnable::class,
         'group' => $group1,
     ]);
 
@@ -289,7 +291,7 @@ test('resolve-exception promotion is isolated per group', function (): void {
         'class' => ScenarioTestJob::class,
         'block_uuid' => $group2,
         'type' => 'resolve-exception',
-        'state' => \StepDispatcher\States\NotRunnable::class,
+        'state' => NotRunnable::class,
         'group' => $group2,
     ]);
 
@@ -300,7 +302,7 @@ test('resolve-exception promotion is isolated per group', function (): void {
     expect($resolve1->fresh()->state)->toBeInstanceOf(Pending::class);
 
     // Group 2: Resolve-exception unchanged
-    expect($resolve2->fresh()->state)->toBeInstanceOf(\StepDispatcher\States\NotRunnable::class);
+    expect($resolve2->fresh()->state)->toBeInstanceOf(NotRunnable::class);
 });
 
 test('sequential ordering is maintained per group', function (): void {

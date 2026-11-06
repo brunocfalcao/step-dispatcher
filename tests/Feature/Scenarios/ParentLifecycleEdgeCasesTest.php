@@ -3,9 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Parent with child_block_uuid that gets children later
 // Parent stays running and waits for children that are created after parent starts

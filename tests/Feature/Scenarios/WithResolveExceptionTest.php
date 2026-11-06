@@ -3,9 +3,10 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
+use StepDispatcher\States\Cancelled;
+use StepDispatcher\States\NotRunnable;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: 1 (default, fails) + resolve-exception (no index)
 // When a default step fails, resolve-exception with no index should be promoted to Pending
@@ -20,7 +21,7 @@ it('promotes resolve-exception without index when default step fails', function 
     [$defaultStep, $resolveStep] = $steps;
 
     // Manually set resolve-exception to NotRunnable (observer would do this, but we need to force it)
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'failed', $resolveStep->id => 'not-runnable'],
@@ -46,7 +47,7 @@ it('runs resolve-exception with index 1 after failure', function (): void {
 
     [$defaultStep, $resolveStep] = $steps;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'failed', $resolveStep->id => 'not-runnable'],
@@ -77,8 +78,8 @@ it('runs sequential resolve-exception steps in order', function (): void {
 
     [$r1, $r2] = $resolveSteps;
 
-    $r1->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r2->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $r1->update(['state' => NotRunnable::class]);
+    $r2->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'failed', $r1->id => 'not-runnable', $r2->id => 'not-runnable'],
@@ -105,7 +106,7 @@ it('does not promote resolve-exception when no failures', function (): void {
 
     [$defaultStep, $resolveStep] = $steps;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'completed', $resolveStep->id => 'not-runnable'],
@@ -130,7 +131,7 @@ it('promotes resolve-exception when step is stopped', function (): void {
 
     [$defaultStep, $resolveStep] = $steps;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'stopped', $resolveStep->id => 'not-runnable'],
@@ -161,7 +162,7 @@ it('promotes resolve-exception in child block when child fails', function (): vo
 
     [$childFail, $resolveStep] = $children;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [
@@ -202,7 +203,7 @@ it('promotes resolve-exception with multiple failures at same index', function (
 
     [$d1, $d2, $resolveStep] = $steps;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$d1->id => 'failed', $d2->id => 'failed', $resolveStep->id => 'not-runnable'],
@@ -230,8 +231,8 @@ it('does not promote resolve-exception when step is cancelled', function (): voi
     [$defaultStep, $resolveStep] = $steps;
 
     // Manually cancel the default step
-    $defaultStep->update(['state' => StepDispatcher\States\Cancelled::class]);
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $defaultStep->update(['state' => Cancelled::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'cancelled', $resolveStep->id => 'not-runnable'],
@@ -274,8 +275,8 @@ it('promotes resolve-exception in both child and parent blocks when child fails'
     [$c1, $c2, $c3, $childResolve] = $childSteps;
 
     // Set resolve-exceptions to not-runnable
-    $parentResolve->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $childResolve->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $parentResolve->update(['state' => NotRunnable::class]);
+    $childResolve->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [
@@ -358,9 +359,9 @@ it('handles skipped resolve-exception among parallel resolve-exceptions in child
 
     [$childFail, $r1, $r2, $r3] = $children;
 
-    $r1->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r2->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r3->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $r1->update(['state' => NotRunnable::class]);
+    $r2->update(['state' => NotRunnable::class]);
+    $r3->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [
@@ -417,9 +418,9 @@ it('handles skipped resolve-exception among sequential resolve-exceptions in chi
 
     [$childFail, $r1, $r2, $r3] = $children;
 
-    $r1->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r2->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r3->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $r1->update(['state' => NotRunnable::class]);
+    $r2->update(['state' => NotRunnable::class]);
+    $r3->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [
@@ -516,10 +517,10 @@ it('handles 4-level deep nesting with resolve-exceptions skipping at level 3', f
     [$s10, $s11] = $level4Steps;
 
     // Set resolve-exceptions to NotRunnable
-    $r1->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r2->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r3->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r4->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $r1->update(['state' => NotRunnable::class]);
+    $r2->update(['state' => NotRunnable::class]);
+    $r3->update(['state' => NotRunnable::class]);
+    $r4->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         // === Level 1 starts ===
@@ -643,7 +644,7 @@ it('completes parent when all children succeed and resolve-exception stays NotRu
 
     [$c1, $c2, $c3, $resolveStep] = $children;
 
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [
@@ -694,9 +695,9 @@ it('completes parent with multiple dormant resolve-exceptions on success path', 
 
     [$c1, $c2, $r1, $r2, $r3] = $children;
 
-    $r1->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r2->update(['state' => StepDispatcher\States\NotRunnable::class]);
-    $r3->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $r1->update(['state' => NotRunnable::class]);
+    $r2->update(['state' => NotRunnable::class]);
+    $r3->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [

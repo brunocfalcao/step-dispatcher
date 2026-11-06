@@ -3,9 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Group A: 1->2 | Group B: 1->2 (independent chains)
 // Two completely independent chains in different groups should not interfere

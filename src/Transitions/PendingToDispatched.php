@@ -6,6 +6,7 @@ namespace StepDispatcher\Transitions;
 
 use Spatie\ModelStates\Transition;
 use StepDispatcher\Models\Step;
+use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Dispatched;
 use StepDispatcher\States\Pending;
@@ -145,7 +146,7 @@ final class PendingToDispatched extends Transition
         // StepsDispatcher::startDispatch(). Without the prefix
         // component two dispatchers (different prefix, same group)
         // would stomp each other's tick id.
-        $cacheSuffix = \StepDispatcher\Models\StepsDispatcher::cacheKeyPrefix().($this->step->group ?? 'global');
+        $cacheSuffix = StepsDispatcher::cacheKeyPrefix().($this->step->group ?? 'global');
         $cacheKey = "current_tick_id:{$cacheSuffix}";
 
         // With no current tick the column is cleared, so this dispatch cannot

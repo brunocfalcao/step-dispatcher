@@ -3,9 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 it('runs a single step wrapped inside 3 nested blocks', function (): void {
     $mainBlock = (string) Str::uuid();

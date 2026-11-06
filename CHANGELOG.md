@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## 1.21.8 - 2026-11-06
+## 2.0.0 - 2026-11-06
 
 ### Fixes
 - [BUG FIX] A worker that lost its step (recovered, stopped or cancelled elsewhere) no longer overwrites it: it writes nothing, runs no later hook and logs one warning.
@@ -26,6 +26,45 @@ All notable changes to this project will be documented in this file.
 - [IMPROVED] New `tests/Collision` suite runs competing PHP processes on real MySQL, or on Postgres with `STEP_DISPATCHER_COLLISION_DRIVER=pgsql`. It skips with the reason when no server is reachable.
 - [IMPROVED] New `tests/Feature/Scenarios` suite pins the workflow rules across dispatch, retries, parents, sweeps and recovery.
 - [IMPROVED] README, PROJECT and configuration comments corrected against the code.
+
+### Upgrade notes
+Each project moves to 2.0 on its own, by changing its requirement to `^2.0`.
+The requirements are unchanged from 1.21.7: PHP `^8.2`, Illuminate
+`^11.0|^12.0|^13.0`, `spatie/laravel-model-states` `^2.0`.
+
+- No migration file is added. The latest one is still
+  `2026_10_20_000000_create_steps_cooldowns_table.php`, from 1.21.0. Three
+  existing migrations were edited: the timestamp migration's rollback, the
+  index migration's description, and the exception-triage migration, whose
+  table filter now also accepts prefixed tables whose prefix contains
+  `dispatcher`. A project that already ran its migrations has nothing to run.
+- A worker that no longer owns its row writes nothing, runs no later hook and
+  logs one warning (`Obsolete step attempt stopped writing`). Its `finally`
+  blocks still run. Code that writes to `$this->step` directly is not covered
+  by this check.
+- A job with `doubleCheck()` that loses its step does not reach
+  `finalizeJobExecution()`, as with a failing double check. Such a job must
+  also release its locks when `needsVerification()` returns true.
+- A parent with a step inside it that has started, at any depth, refuses to
+  become Skipped and stays Running. `skipJob()` logs the refusal. A direct
+  `transitionTo(Skipped::class)` on that parent throws.
+- A parent stays Completed when its own job fails after the dispatcher
+  completed it. The error is stored and a warning is logged.
+- A project listener that reacts to a saved state now runs after the result is
+  committed. If it fails, the state stays and the listener does not run again.
+- Nothing is dispatched or started under a Skipped ancestor. A Dispatched
+  step whose worker is refused for this reason moves to Skipped.
+- A dispatch with no current tick clears `tick_id` on the step.
+- The critical `stale_dispatched_steps_still_stuck` alert needs every step in
+  the batch to carry the rescue note in `error_message`. Earlier retries no
+  longer count.
+- The dispatcher cache keys `current_tick_id:` and
+  `steps_dispatcher_tick_start:` gain a `|` separator for a prefixed scope:
+  `trading_|alpha` where it was `trading_alpha`. The default scope is
+  unchanged. A project that reads these keys directly must follow the new
+  form. The `dispatcher:saturation:` counter keys are unchanged.
+- `StepDispatcher::batchTransitionSteps()` gained an optional third argument.
+  Existing calls behave as before.
 
 ## 1.21.7 - 2026-11-02
 

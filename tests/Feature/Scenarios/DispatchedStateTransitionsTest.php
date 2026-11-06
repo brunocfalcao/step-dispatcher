@@ -3,9 +3,10 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
+use StepDispatcher\States\Cancelled;
+use StepDispatcher\States\Skipped;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Pending → Dispatched → Running/Completed
 // Normal step should transition through Dispatched state
@@ -136,7 +137,7 @@ it('does not dispatch skipped steps', function (): void {
     ], ScenarioTestJob::class)[0];
 
     // Manually skip the step
-    $step->update(['state' => StepDispatcher\States\Skipped::class]);
+    $step->update(['state' => Skipped::class]);
 
     StepDispatcher\Support\StepDispatcher::dispatch($step->group);
 
@@ -150,7 +151,7 @@ it('does not dispatch cancelled steps', function (): void {
     $step = StepTester::createSteps([[]], ScenarioTestJob::class)[0];
 
     // Manually cancel the step
-    $step->update(['state' => StepDispatcher\States\Cancelled::class]);
+    $step->update(['state' => Cancelled::class]);
 
     StepDispatcher\Support\StepDispatcher::dispatch($step->group);
 

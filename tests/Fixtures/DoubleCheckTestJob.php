@@ -25,27 +25,27 @@ final class DoubleCheckTestJob extends BaseStepJob
 
     public function startOrSkip(): bool
     {
-        usleep(static::$startDelayMicroseconds);
+        usleep(self::$startDelayMicroseconds);
 
         return true;
     }
 
     protected function compute(): mixed
     {
-        static::$computeRuns++;
+        self::$computeRuns++;
 
         return ['v' => 1];
     }
 
     public function doubleCheck(): bool
     {
-        return static::$pass;
+        return self::$pass;
     }
 
     public static function reset(): void
     {
-        static::$pass = true;
-        static::$computeRuns = 0;
-        static::$startDelayMicroseconds = 0;
+        self::$pass = true;
+        self::$computeRuns = 0;
+        self::$startDelayMicroseconds = 0;
     }
 }

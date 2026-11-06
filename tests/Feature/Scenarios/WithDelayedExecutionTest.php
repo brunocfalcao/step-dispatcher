@@ -3,9 +3,8 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: [∅] with dispatch_after in future
 // A step with dispatch_after in the future should NOT dispatch yet

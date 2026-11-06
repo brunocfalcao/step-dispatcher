@@ -6,9 +6,8 @@ use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\Models\StepsDispatcherTicks;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Concurrent dispatch prevention
 // When dispatcher is already running, second dispatch should be skipped
@@ -46,7 +45,7 @@ it('skips dispatch when lock is already held', function (): void {
 it('frees the lock after a step with a missing job class fails', function (): void {
     $block = (string) Str::uuid();
 
-    $step = StepDispatcher\Models\Step::factory()->create([
+    $step = Step::factory()->create([
         'block_uuid' => $block,
         'index' => 1,
         'class' => 'NonExistent\\Class\\That\\Will\\Fail',

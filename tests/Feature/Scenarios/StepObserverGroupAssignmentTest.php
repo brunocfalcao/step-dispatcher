@@ -416,4 +416,3 @@ test('steps created inside collection each() distribute correctly', function ():
         expect($count)->toBe(2, "Group {$group} should have 2 steps, got {$count}");
     }
 });
-

@@ -3,9 +3,9 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Str;
-use StepDispatcher\Tests\Support\StepTester;
+use StepDispatcher\States\NotRunnable;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Multiple steps with index=null in same block
 // All should dispatch in parallel (no dependency)
@@ -92,7 +92,7 @@ it('handles index null resolve-exception step', function (): void {
     ], ScenarioTestJob::class)[0];
 
     // Manually set to not-runnable
-    $resolveStep->update(['state' => StepDispatcher\States\NotRunnable::class]);
+    $resolveStep->update(['state' => NotRunnable::class]);
 
     $statusMatrix = [
         1 => [$defaultStep->id => 'failed', $resolveStep->id => 'not-runnable'],

@@ -14,8 +14,9 @@ pest()->tia()
 
 uses(TestCase::class)->in('Feature', 'Unit');
 
-// Multi-process collision tests run against a real MySQL server, outside the
-// SQLite in-memory suite and without its frozen clock or wrapping transaction.
+// Multi-process collision tests run against a real MySQL or Postgres server (see
+// CollisionEnvironment), outside the SQLite in-memory suite and without its
+// frozen clock or wrapping transaction.
 uses(CollisionTestCase::class)->in('Collision');
 
 // Workflow scenarios assert exact states tick by tick, so the clock stays still.

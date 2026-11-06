@@ -6,10 +6,16 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
+use StepDispatcher\States\Completed;
+use StepDispatcher\States\Dispatched;
+use StepDispatcher\States\Failed;
 use StepDispatcher\States\Pending;
+use StepDispatcher\States\Running;
 use StepDispatcher\Support\RuntimeContext;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Support\Steps;
+use StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+use StepDispatcher\Tests\Fixtures\PrefixThrowingTestJob;
 
 /**
  * Critical contract: when the dispatcher tick promotes a Step into
@@ -33,7 +39,7 @@ beforeEach(function (): void {
 it('dispatched job carries its prefix and attempt generation', function () {
     Steps::usingPrefix('trading', function (): void {
         $step = Step::create([
-            'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+            'class' => PrefixCarryingTestJob::class,
             'type' => 'default',
             'queue' => 'default',
             'group' => 'payload-test',
@@ -45,7 +51,7 @@ it('dispatched job carries its prefix and attempt generation', function () {
         StepDispatcher::dispatch('payload-test');
 
         Queue::assertPushed(
-            \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+            PrefixCarryingTestJob::class,
             function ($job) use ($step): bool {
                 return $job->step->id === $step->id
                     && $job->stepPrefix === 'trading_'
@@ -60,7 +66,7 @@ it('dispatched job carries its prefix and attempt generation', function () {
 it('successful worker execution reads and writes only the prefixed step', function (): void {
     $stepId = Steps::usingPrefix('trading', function (): int {
         $step = Step::create([
-            'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+            'class' => PrefixCarryingTestJob::class,
             'type' => 'default',
             'queue' => 'default',
             'group' => 'successful-prefix',
@@ -70,20 +76,20 @@ it('successful worker execution reads and writes only the prefixed step', functi
         ]);
 
         DB::table('trading_steps')->where('id', $step->id)->update([
-            'state' => \StepDispatcher\States\Dispatched::class,
+            'state' => Dispatched::class,
         ]);
 
         return $step->id;
     });
 
     app(RuntimeContext::class)->reset();
-    $job = new \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+    $job = new PrefixCarryingTestJob;
     $job->step = Steps::usingPrefix('trading', fn (): Step => Step::findOrFail($stepId));
     $job->stepPrefix = 'trading_';
     $job->handle();
 
     $prefixed = Steps::usingPrefix('trading', fn (): Step => Step::findOrFail($stepId));
-    expect($prefixed->state)->toBeInstanceOf(\StepDispatcher\States\Completed::class)
+    expect($prefixed->state)->toBeInstanceOf(Completed::class)
         ->and($prefixed->response)->toBe(['observed_prefix' => 'trading_'])
         ->and(DB::table('steps')->where('id', $stepId)->exists())->toBeFalse();
 });
@@ -95,7 +101,7 @@ it('handle() pushes stepPrefix and the finally pop balances the stack', function
     app(RuntimeContext::class)->reset();
 
     $step = Step::create([
-        'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+        'class' => PrefixCarryingTestJob::class,
         'type' => 'default',
         'queue' => 'default',
         'group' => 'handle-balance',
@@ -104,7 +110,7 @@ it('handle() pushes stepPrefix and the finally pop balances the stack', function
         'state' => Pending::class,
     ]);
 
-    $job = new \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+    $job = new PrefixCarryingTestJob;
     $job->step = $step;
     $job->stepPrefix = 'trading_';
 
@@ -128,7 +134,7 @@ it('handle() balances the stack when a failure escapes it', function () {
     app(RuntimeContext::class)->reset();
 
     $step = Steps::usingPrefix('trading', fn (): Step => Step::create([
-        'class' => \StepDispatcher\Tests\Fixtures\PrefixThrowingTestJob::class,
+        'class' => PrefixThrowingTestJob::class,
         'type' => 'default',
         'queue' => 'default',
         'group' => 'handle-balance',
@@ -137,7 +143,7 @@ it('handle() balances the stack when a failure escapes it', function () {
         'state' => Pending::class,
     ]));
 
-    $job = new \StepDispatcher\Tests\Fixtures\PrefixThrowingTestJob;
+    $job = new PrefixThrowingTestJob;
     $job->step = $step;
     $job->stepPrefix = 'trading_';
 
@@ -153,7 +159,7 @@ it('failed() pushes stepPrefix and writes the Failed transition to the prefixed 
 
     Steps::usingPrefix('trading', function () {
         $step = Step::create([
-            'class' => \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob::class,
+            'class' => PrefixCarryingTestJob::class,
             'type' => 'default',
             'queue' => 'default',
             'group' => 'failed-test',
@@ -169,11 +175,11 @@ it('failed() pushes stepPrefix and writes the Failed transition to the prefixed 
         // rescheduled by someone else and must not be clobbered. Put the
         // row in the legitimate worker-death shape: Running.
         DB::table('trading_steps')->where('id', $stepId)->update([
-            'state' => \StepDispatcher\States\Running::class,
+            'state' => Running::class,
         ]);
         $step->refresh();
 
-        $job = new \StepDispatcher\Tests\Fixtures\PrefixCarryingTestJob;
+        $job = new PrefixCarryingTestJob;
         $job->step = $step;
         $job->stepPrefix = 'trading_';
         $job->startMicrotime = microtime(true);
@@ -194,7 +200,7 @@ it('failed() pushes stepPrefix and writes the Failed transition to the prefixed 
         // not the (empty) default `steps` table. Read the row
         // through DB::table to bypass any Eloquent caching.
         $row = DB::table('trading_steps')->where('id', $stepId)->first();
-        expect($row->state)->toBe(\StepDispatcher\States\Failed::class,
+        expect($row->state)->toBe(Failed::class,
             'failed() must push stepPrefix BEFORE the update so the '
             .'Failed transition lands in `trading_steps`. Without '
             .'that push the update would have hit the unprefixed '

@@ -11,8 +11,8 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
-use Log;
 use RuntimeException;
 use StepDispatcher\Concerns\BaseStepJob\FormatsStepResult;
 use StepDispatcher\Concerns\BaseStepJob\HandlesStepExceptions;
@@ -242,7 +242,10 @@ abstract class BaseStepJob implements ShouldQueue
             // that includes what a consumer's executeJobLogic() does before
             // compute(). There is no check like this after executeJobLogic():
             // consumers release locks in finalizeJobExecution(), so that path
-            // still runs and its own steps are guarded one by one.
+            // still runs and its own steps are guarded one by one. A job with
+            // doubleCheck() differs: needsVerification() returns true for a
+            // lost step, as it does for a failing double check, so that job
+            // must also release its locks when needsVerification() is true.
             if ($this->attemptIsSuperseded()) {
                 return;
             }

@@ -6,10 +6,10 @@ use StepDispatcher\Models\Step;
 use StepDispatcher\States\Cancelled;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Failed;
+use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
 
 // Reproduces the exact production bug: a step is dispatched to the queue,
 // then cancelled by cascade cancellation before the worker picks it up.
@@ -46,7 +46,7 @@ it('silently skips execution when step is already Failed', function (): void {
     ]);
 
     // Transition to Failed via valid path: Pending → Running → Failed
-    $step->state->transitionTo(StepDispatcher\States\Running::class);
+    $step->state->transitionTo(Running::class);
     $step->state->transitionTo(Failed::class);
     $step->refresh();
     expect($step->state)->toBeInstanceOf(Failed::class);
@@ -67,7 +67,7 @@ it('silently skips execution when step is already Completed', function (): void 
     ]);
 
     // Transition to Completed via valid path: Pending → Running → Completed
-    $step->state->transitionTo(StepDispatcher\States\Running::class);
+    $step->state->transitionTo(Running::class);
     $step->state->transitionTo(Completed::class);
     $step->refresh();
     expect($step->state)->toBeInstanceOf(Completed::class);
@@ -88,7 +88,7 @@ it('silently skips execution when step is already Stopped', function (): void {
     ]);
 
     // Transition to Stopped via valid path: Pending → Running → Stopped
-    $step->state->transitionTo(StepDispatcher\States\Running::class);
+    $step->state->transitionTo(Running::class);
     $step->state->transitionTo(Stopped::class);
     $step->refresh();
     expect($step->state)->toBeInstanceOf(Stopped::class);
@@ -109,7 +109,7 @@ it('silently skips execution when step is already Skipped', function (): void {
     ]);
 
     // Transition to Skipped via valid path: Pending → Running → Skipped
-    $step->state->transitionTo(StepDispatcher\States\Running::class);
+    $step->state->transitionTo(Running::class);
     $step->state->transitionTo(Skipped::class);
     $step->refresh();
     expect($step->state)->toBeInstanceOf(Skipped::class);

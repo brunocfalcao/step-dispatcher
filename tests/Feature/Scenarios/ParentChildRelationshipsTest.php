@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
+use StepDispatcher\Tests\Support\StepTester;
 
 /*
 |--------------------------------------------------------------------------

@@ -7,9 +7,10 @@ use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\States\Completed;
 use StepDispatcher\States\Pending;
+use StepDispatcher\States\Skipped;
 use StepDispatcher\Support\StepDispatcher;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
+use StepDispatcher\Tests\Support\StepTester;
 
 // ========================================================================
 // PRIORITY ESCALATION TESTS
@@ -327,7 +328,7 @@ it('does not escalate priority on non-retry state transitions', function (): voi
     $step->refresh();
 
     // Should be skipped, not escalated to high priority
-    expect($step->state)->toBeInstanceOf(\StepDispatcher\States\Skipped::class)
+    expect($step->state)->toBeInstanceOf(Skipped::class)
         ->and($step->priority)->toBe('default');
 });
 

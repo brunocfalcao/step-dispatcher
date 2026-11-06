@@ -5,9 +5,8 @@ declare(strict_types=1);
 use Illuminate\Support\Str;
 use StepDispatcher\Models\StepsDispatcher;
 use StepDispatcher\Models\StepsDispatcherTicks;
-use StepDispatcher\Tests\Support\StepTester;
 use StepDispatcher\Tests\Fixtures\ScenarioTestJob;
-
+use StepDispatcher\Tests\Support\StepTester;
 
 // Schematic: Early return Step 0 - No skipped parent steps found
 // If no parents are skipped, skipAllChildStepsOnParentAndChildSingleStep should return early
