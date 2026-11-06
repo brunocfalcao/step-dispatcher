@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.2 - 2026-11-06
+
+### Improvements
+- [IMPROVED] The package sets Composer's `process-timeout` to 1800 seconds, so `composer test:full` is not stopped at the default limit of 300 seconds. The full suite takes about six minutes.
+
+### Upgrade notes
+No package code, migration or requirement changed. Composer reads this setting only from the project it runs in, so consuming applications see no difference.
+
 ## 2.0.1 - 2026-11-06
 
 ### Fixes

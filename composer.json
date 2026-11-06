@@ -40,6 +40,7 @@
     "minimum-stability": "stable",
     "prefer-stable": true,
     "config": {
+        "process-timeout": 1800,
         "allow-plugins": {
             "pestphp/pest-plugin": true
         }

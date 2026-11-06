@@ -1,5 +1,11 @@
 # step-dispatcher
 
+## Changes in v2.0.2
+
+The package sets Composer's `process-timeout` to 1800 seconds, so
+`composer test:full` is not stopped at the default limit of 300 seconds. No
+package code changed, and consuming applications see no difference.
+
 ## Changes in v2.0.1
 
 A step whose double check already passed (`double_check = 99`) and that is
