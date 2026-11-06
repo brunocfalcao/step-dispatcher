@@ -246,6 +246,10 @@ abstract class BaseStepJob implements ShouldQueue
             // doubleCheck() differs: needsVerification() returns true for a
             // lost step, as it does for a failing double check, so that job
             // must also release its locks when needsVerification() is true.
+            // The same holds for an attempt whose own work already decided
+            // its outcome (a retry, reschedule, skip or stop asked for inside
+            // compute()) and for a failing re-check of a sealed step: both
+            // return true there, so finalizeJobExecution() does not run.
             if ($this->attemptIsSuperseded()) {
                 return;
             }

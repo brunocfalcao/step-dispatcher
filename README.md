@@ -1,5 +1,33 @@
 # step-dispatcher
 
+## Changes in v2.0.1
+
+A step whose double check already passed (`double_check = 99`) and that is
+retried, for example after its worker died or `complete()` asked for a retry,
+no longer ends Failed with "verification budget exhausted". It does not run
+`compute()` again, but runs `doubleCheck()` again: a pass goes on to
+`confirmOrRetry()` and `complete()`, and a failure ends the step Failed. An
+attempt whose `compute()` already decided its own outcome (`retryJob()`,
+`rescheduleWithoutRetry()`, `skipJob()` or `stopJob()`) is no longer checked,
+sealed or counted, so the next attempt runs `compute()` again. See
+[Job lifecycle](#job-lifecycle).
+
+### Upgrade notes
+
+No migration is added and the requirements are unchanged from 2.0.0. The
+[changelog](CHANGELOG.md) lists every change. What a project can observe:
+
+- A job with `doubleCheck()` whose `compute()` asks for its own retry now really
+  runs `compute()` again, so that `compute()` must be safe to repeat.
+- `rescheduleWithoutRetry()` inside `compute()` does not count against the retry
+  limit. For a job with `doubleCheck()`, a condition that never clears now keeps
+  rescheduling, where before it ended Failed.
+- `doubleCheck()` of a sealed step runs again on every later attempt, so it must
+  be safe to call repeatedly.
+- Such a job does not reach `finalizeJobExecution()` when `compute()` decided its
+  own outcome or the re-check of a sealed step fails, so it must release its
+  locks when `needsVerification()` returns true.
+
 ## Changes in v2.0.0
 
 A worker that lost its step while running (recovered, stopped or cancelled
@@ -487,7 +515,7 @@ The retry budget is checked after those guards. Then `compute()` runs when
 
 | Optional hook | Behavior |
 |---|---|
-| `doubleCheck()` | False increments the verification counter and retries; compute is not repeated on verification passes. Two false results cause the following ordinary verification pass to mark the step Failed directly (if the ordinary retry budget has not already stopped the run). Success marks verification with `double_check = 99`. |
+| `doubleCheck()` | False increments the verification counter and retries; compute is not repeated on verification passes. Two false results cause the following ordinary verification pass to mark the step Failed directly (if the ordinary retry budget has not already stopped the run). Success marks verification with `double_check = 99`. A later attempt of a step marked this way does not run `compute()`, but runs `doubleCheck()` again: a pass goes on to `confirmOrRetry()` and `complete()` and keeps `double_check = 99`; a failure marks the step Failed (not retried) and keeps 99. An attempt that already decided its own outcome inside `compute()` (`retryJob()`, `rescheduleWithoutRetry()`, `skipJob()`, `stopJob()`) is not verified or marked, and the next attempt runs `compute()` again. |
 | `confirmOrRetry()` | False switches to `confirming-completion` and returns to Pending. Later runs check confirmation without repeating compute. |
 | `complete()` | Called before ordinary completion if no lifecycle control already changed status; its return value is ignored. |
 

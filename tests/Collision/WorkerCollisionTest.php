@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
 use StepDispatcher\Models\Step;
 use StepDispatcher\Models\StepsDispatcher;
@@ -17,6 +19,8 @@ use StepDispatcher\States\Pending;
 use StepDispatcher\States\Running;
 use StepDispatcher\States\Skipped;
 use StepDispatcher\States\Stopped;
+use StepDispatcher\Tests\Collision\CollisionEnvironment;
+use StepDispatcher\Tests\Fixtures\CollisionSealedTestJob;
 use StepDispatcher\Tests\Fixtures\CollisionTestJob;
 
 /*
@@ -603,4 +607,81 @@ it('returns only configured group names, 200 in total, when eight callers rotate
     sort($expected);
 
     expect($distinct)->toBe($expected);
+});
+
+it('finishes a step whose worker was killed after its double check passed, checking again but not computing again', function (): void {
+    // The test is only meaningful if the worker can really be killed: fail
+    // loudly, never skip, when this PHP cannot send the signal.
+    expect(function_exists('posix_kill'))->toBeTrue('posix_kill() is missing, so a worker cannot be killed for real.')
+        ->and(defined('SIGKILL'))->toBeTrue();
+
+    Schema::connection(CollisionEnvironment::CONNECTION)->create('collision_events', function (Blueprint $table): void {
+        $table->id();
+        $table->unsignedBigInteger('step_id')->index();
+        $table->string('event');
+        $table->unsignedInteger('pid');
+    });
+
+    $events = static fn (int $stepId): array => DB::table('collision_events')
+        ->where('step_id', $stepId)
+        ->orderBy('id')
+        ->pluck('event')
+        ->all();
+
+    $step = collisionCreateStep([
+        'class' => CollisionSealedTestJob::class,
+        'state' => Dispatched::class,
+    ]);
+
+    // First worker: runs the job for real, passes the check and is killed inside complete().
+    $first = $this->launchWorkers([
+        ['scenario' => 'handle-sealed', 'arguments' => ['step_id' => $step->id]],
+    ]);
+
+    try {
+        $report = $first->wait()[0];
+    } finally {
+        $first->terminate();
+    }
+
+    $afterKill = collisionStepRow($step->id);
+
+    expect($report['timed_out'])->toBeFalse()
+        ->and($report['payload'])->toBeNull('the first worker finished instead of dying')
+        ->and($report['term_signal'])->toBe(9)
+        ->and($events($step->id))->toBe(['compute', 'doubleCheck', 'complete'])
+        ->and(['state' => $afterKill['state'], 'double_check' => (int) $afterKill['double_check'], 'retries' => (int) $afterKill['retries']])
+        ->toBe(['state' => Running::class, 'double_check' => 99, 'retries' => 0]);
+
+    // Recovery: the claim goes stale, and the real command puts the step back.
+    collisionStaleRunningRow($step->id);
+
+    expect(Artisan::call('steps:recover-stale'))->toBe(0);
+
+    $recovered = collisionStepRow($step->id);
+
+    expect(['state' => $recovered['state'], 'double_check' => (int) $recovered['double_check'], 'retries' => (int) $recovered['retries']])
+        ->toBe(['state' => Pending::class, 'double_check' => 99, 'retries' => 1]);
+
+    // Dispatch it again, as the dispatcher would, and let a second worker run it to the end.
+    DB::table(Step::tableName())->where('id', $step->id)->update(['state' => Dispatched::class]);
+
+    $payloads = $this->runWorkers(
+        [['scenario' => 'handle-sealed', 'arguments' => ['step_id' => $step->id]]],
+        'second worker after the kill',
+    );
+
+    $final = collisionStepRow($step->id);
+
+    expect($payloads[0]['result']['handled'])->toBeTrue()
+        ->and(['state' => $final['state'], 'double_check' => (int) $final['double_check'], 'retries' => (int) $final['retries']])
+        ->toBe(['state' => Completed::class, 'double_check' => 99, 'retries' => 1])
+        ->and($events($step->id))->toBe(['compute', 'doubleCheck', 'complete', 'doubleCheck', 'complete'])
+        ->and((string) $final['error_message'])->not->toContain('verification budget exhausted');
+
+    if (getenv('STEP_DISPATCHER_COLLISION_REPORT') === '1') {
+        fwrite(STDERR, "\n[collision] finished step error_message: ".var_export($final['error_message'], true)."\n");
+    }
+
+    expect($final['error_message'])->toBe($recovered['error_message']);
 });

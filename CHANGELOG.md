@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.1 - 2026-11-06
+
+### Fixes
+- [BUG FIX] A step sealed by a passed double check (`double_check` 99) that is retried, for example after its worker died or `complete()` asked for a retry, no longer ends Failed with "verification budget exhausted". It does not run `compute()` again and runs `doubleCheck()` again. A pass goes on to `confirmOrRetry()` and `complete()`, and the seal stays. A failure ends the step Failed with the error "doubleCheck() no longer confirms a step that had already passed its double check", and the seal stays.
+- [BUG FIX] An attempt whose `compute()` already decided its own outcome (`retryJob()`, `rescheduleWithoutRetry()`, `skipJob()` or `stopJob()`) is no longer double checked, sealed or counted, and `finalizeJobExecution()` does not run. After a retry or reschedule the next attempt runs `compute()` again. Before, such an attempt was still checked: a pass sealed the step and the next attempt ended Failed, and a failure spent the verification budget so `compute()` never ran again.
+
+### Improvements
+- [IMPROVED] The `tests/Collision` suite gained a test that kills a worker with SIGKILL after its double check passed, recovers the step with `steps:recover-stale` and checks that the next worker finishes it without computing again.
+
+### Upgrade notes
+No migration is added and the requirements are unchanged from 2.0.0.
+
+- A job with `doubleCheck()` whose `compute()` asks for its own retry now really
+  runs `compute()` again on the next attempt, so that `compute()` must be safe
+  to repeat.
+- `rescheduleWithoutRetry()` inside `compute()` does not count against the
+  retry limit. For a job with `doubleCheck()`, a condition that never clears now
+  keeps rescheduling, where before it ended Failed.
+- `doubleCheck()` of a sealed step runs again on every later attempt, so it must
+  be safe to call repeatedly.
+- A job with `doubleCheck()` does not reach `finalizeJobExecution()` when its
+  `compute()` decided its own outcome, or when the re-check of a sealed step
+  fails. As in 2.0.0 for a lost step, such a job must also release its locks
+  when `needsVerification()` returns true.
+
 ## 2.0.0 - 2026-11-06
 
 ### Fixes

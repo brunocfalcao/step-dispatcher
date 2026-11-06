@@ -24,6 +24,11 @@ use StepDispatcher\States\Stopped;
  */
 trait HandlesStepLifecycle
 {
+    /**
+     * The double_check value that seals a step whose doubleCheck() passed.
+     */
+    private const DOUBLE_CHECK_PASSED = 99;
+
     // ========================================================================
     // STATE TRANSITION HELPERS
     // ========================================================================
@@ -275,6 +280,28 @@ trait HandlesStepLifecycle
             return true;
         }
 
+        // This attempt's own work already decided its outcome, for example by
+        // asking for its own retry. Nothing is checked, sealed or incremented,
+        // and double_check stays as it was, so the next attempt runs compute()
+        // again.
+        if ($this->stepStatusUpdated) {
+            return true;
+        }
+
+        // A sealed step is checked again: what the earlier check confirmed may
+        // have changed since. A pass goes on to confirm and complete, and the
+        // seal stays. A failure fails the step; it is not retried and not
+        // completed.
+        if ((int) $this->step->double_check === self::DOUBLE_CHECK_PASSED) {
+            if ($this->doubleCheck() !== false) {
+                return false;
+            }
+
+            $this->failStepAfterDoubleCheck('doubleCheck() no longer confirms a step that had already passed its double check');
+
+            return true;
+        }
+
         // Exhausted double-check budget. Pre-fix, this branch fell
         // through to needsVerification()=false → finalizeJobExecution()
         // → shouldComplete() — the step was COMPLETED even though
@@ -285,20 +312,7 @@ trait HandlesStepLifecycle
         // workflow advances against unverified state. Fail the step
         // explicitly so the parent's resolve-exception path runs.
         if ($this->step->double_check >= 2) {
-            $this->whileAttemptOwnsStep(function (Step $row): void {
-                $this->step->update([
-                    'error_message' => 'doubleCheck() failed twice — verification budget exhausted without confirmation',
-                ]);
-                $this->finalizeDuration();
-
-                if ($this->keepsCompletedResult($row)) {
-                    return;
-                }
-
-                $this->step->state->transitionTo(Failed::class);
-            }, runsOnCompletedParent: true);
-
-            $this->stepStatusUpdated = true;
+            $this->failStepAfterDoubleCheck('doubleCheck() failed twice — verification budget exhausted without confirmation');
 
             return true;
         }
@@ -310,9 +324,30 @@ trait HandlesStepLifecycle
             return true;
         }
 
-        $this->whileAttemptOwnsStep(fn () => $this->step->update(['double_check' => 99]), runsOnCompletedParent: true);
+        $this->whileAttemptOwnsStep(fn () => $this->step->update(['double_check' => self::DOUBLE_CHECK_PASSED]), runsOnCompletedParent: true);
 
         return false;
+    }
+
+    /**
+     * Ends the step as Failed because its double check cannot confirm it. A
+     * parent that the dispatcher already completed keeps its completed result,
+     * and only the error text and duration are stored.
+     */
+    private function failStepAfterDoubleCheck(string $message): void
+    {
+        $this->whileAttemptOwnsStep(function (Step $row) use ($message): void {
+            $this->step->update(['error_message' => $message]);
+            $this->finalizeDuration();
+
+            if ($this->keepsCompletedResult($row)) {
+                return;
+            }
+
+            $this->step->state->transitionTo(Failed::class);
+        }, runsOnCompletedParent: true);
+
+        $this->stepStatusUpdated = true;
     }
 
     protected function shouldRunConfirmingCompletionMode(): bool

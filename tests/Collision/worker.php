@@ -21,6 +21,7 @@ use StepDispatcher\States\Completed;
 use StepDispatcher\StepDispatcherServiceProvider;
 use StepDispatcher\Support\StepDispatcher;
 use StepDispatcher\Tests\Collision\CollisionEnvironment;
+use StepDispatcher\Tests\Fixtures\CollisionSealedTestJob;
 use StepDispatcher\Tests\Fixtures\CollisionTestJob;
 
 require dirname(__DIR__, 2).'/vendor/autoload.php';
@@ -89,6 +90,21 @@ $call = match ($scenario) {
 
         return ['handled' => true];
     },
+    'handle-sealed' => static function () use ($arguments): array {
+        $step = Step::query()->findOrFail($arguments['step_id']);
+
+        // Same construction as the 'handle' scenario, for the job that kills
+        // its own process after its double check passed.
+        $job = new CollisionSealedTestJob;
+        $job->step = $step;
+        $job->stepAttemptSnapshotAvailable = true;
+        $job->stepAttemptRetries = (int) $step->retries;
+        $job->stepAttemptTickId = $step->tick_id === null ? null : (int) $step->tick_id;
+        $job->stepAttemptStartedAt = $step->started_at?->format('Y-m-d H:i:s.u');
+        $job->handle();
+
+        return ['handled' => true];
+    },
     'cancel' => static fn (): array => [
         'transitioned' => StepDispatcher::batchTransitionSteps([(int) $arguments['step_id']], Cancelled::class),
     ],
@@ -113,6 +129,7 @@ $call = match ($scenario) {
 // makes one contender systematically later than the other.
 DB::select('SELECT 1');
 class_exists(CollisionTestJob::class);
+class_exists(CollisionSealedTestJob::class);
 
 // Wait for the shared start instant. A worker that arrives late is reported,
 // so the parent can see that it did not collide with the others.

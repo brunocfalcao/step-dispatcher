@@ -524,8 +524,8 @@ it('keeps writing after a current attempt moved its own step', function (): void
     expect($fresh->state)->toBeInstanceOf(Pending::class)
         ->and($fresh->retries)->toBe(1)
         ->and($fresh->response)->toBe(['from' => 'this attempt'])
-        ->and($fresh->double_check)->toBe(99)
-        ->and(ObsoleteAttemptTestJob::$hooks)->toBe(['compute', 'doubleCheck', 'confirmOrRetry']);
+        ->and($fresh->double_check)->toBe(0)
+        ->and(ObsoleteAttemptTestJob::$hooks)->toBe(['compute']);
 });
 
 it('reschedules a current attempt without using a retry as before', function (): void {

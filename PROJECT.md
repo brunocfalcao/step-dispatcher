@@ -63,10 +63,27 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
   `executeJobLogic()`, because consumers release locks in
   `finalizeJobExecution()`; each step of that path is guarded instead. A job with
   `doubleCheck()` must also release its locks when `needsVerification()` is true,
-  because a lost step returns true there as a failing double check does. Consumer
+  because a lost step returns true there as a failing double check does, and so
+  does an attempt that decided its own outcome in `compute()` and a failing
+  re-check of a sealed step. Consumer
   code that writes to `$this->step` directly is not covered by this check. A row lock
   is not exercised on SQLite, so `tests/Feature` proves the checks and
   `tests/Collision` proves the lock on real MySQL and Postgres.
+- Double check (`shouldDoubleCheck()`, since 2.0.1): `compute()` runs only while
+  `double_check` is 0. A step sealed by a passed check (99) that is retried, for
+  example after its worker died or `complete()` asked for a retry, does not run
+  `compute()` again and runs `doubleCheck()` again. A pass goes on to
+  `confirmOrRetry()` and `complete()`, and the seal stays. A failure ends the
+  step Failed ("doubleCheck() no longer confirms a step that had already passed
+  its double check"), is not retried, and the seal stays. A value of 2 or more
+  that is not 99 is an exhausted budget and ends the step Failed. An attempt
+  whose `compute()` already decided its own outcome (`retryJob()`,
+  `rescheduleWithoutRetry()`, `skipJob()`, `stopJob()`) is not checked, sealed or
+  counted, and `finalizeJobExecution()` does not run, so the next attempt runs
+  `compute()` again and that `compute()` must be safe to repeat. A reschedule
+  inside `compute()` does not count against the retry limit. Before 2.0.1 a
+  retried sealed step ended Failed with "verification budget exhausted", and an
+  attempt that had decided its own outcome was still checked.
 - Cancel, skip and resolver-promotion sweeps (`batchTransitionSteps`) lock each
   row before changing it, and the parent sweeps conclude a parent only while it
   is still Running. The skip sweep leaves a Running descendant to finish.
@@ -111,7 +128,7 @@ Manifest requirements: PHP `^8.2`, `illuminate/support` `^11.0|^12.0|^13.0`. Exa
 
 Available entrypoints: `composer test`, `composer test:full`. Choose the narrowest relevant check; a listed full-suite, build, install, or packaging command is not an instruction to run it for every edit. Inspect test environment and side effects first.
 
-`tests/Collision` contends separate PHP processes on the fixed database `step_dispatcher_collision_tests`: local MySQL by default, Postgres with `STEP_DISPATCHER_COLLISION_DRIVER=pgsql`. It skips with the reason when no server is reachable. Run one at a time per server, and on both servers after changing a lock or a state save. Mutation checks belong in a scratch copy, because local apps symlink to this folder.
+`tests/Collision` contends separate PHP processes on the fixed database `step_dispatcher_collision_tests`: local MySQL by default, Postgres with `STEP_DISPATCHER_COLLISION_DRIVER=pgsql`. It skips with the reason when no server is reachable. Run one at a time per server, and on both servers after changing a lock or a state save. Mutation checks belong in a scratch copy, because local apps symlink to this folder. One collision test kills a worker with `SIGKILL` after its double check passed (`tests/Fixtures/CollisionSealedTestJob.php`); it fails, not skips, when `posix_kill()` is missing.
 
 `tests/Feature/Scenarios` pins the workflow rules on SQLite with a frozen clock.
 Details and run commands: `../../../docs/step-dispatcher/02-features/testing.md`.

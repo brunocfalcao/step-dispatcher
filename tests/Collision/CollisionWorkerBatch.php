@@ -87,6 +87,7 @@ final class CollisionWorkerBatch
             'launched_at' => microtime(true),
             'exit_code' => null,
             'timed_out' => false,
+            'term_signal' => null,
         ];
     }
 
@@ -94,7 +95,7 @@ final class CollisionWorkerBatch
      * Waits for every worker to exit, killing any that pass the deadline, and
      * returns one report per worker in launch order.
      *
-     * @return list<array{label: string, exit_code: ?int, timed_out: bool, payload: ?array<string, mixed>, stderr: string}>
+     * @return list<array{label: string, exit_code: ?int, timed_out: bool, term_signal: ?int, payload: ?array<string, mixed>, stderr: string}>
      */
     public function wait(): array
     {
@@ -120,6 +121,7 @@ final class CollisionWorkerBatch
                 }
 
                 $this->workers[$index]['exit_code'] = $status['exitcode'];
+                $this->workers[$index]['term_signal'] = $status['signaled'] ? $status['termsig'] : null;
             }
 
             if (! $pending) {
@@ -136,6 +138,7 @@ final class CollisionWorkerBatch
                 'label' => $worker['label'],
                 'exit_code' => $worker['exit_code'],
                 'timed_out' => $worker['timed_out'],
+                'term_signal' => $worker['term_signal'],
                 'payload' => $this->decodePayload($worker['stdout']),
                 'stderr' => $this->readTail($worker['stderr']),
             ];
